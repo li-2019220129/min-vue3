@@ -20,6 +20,7 @@ class ReactiveEffect {
       });
       this._deps.clear();
     }
+    if (this.options?.onStop) this.options.onStop();
   }
 }
 
