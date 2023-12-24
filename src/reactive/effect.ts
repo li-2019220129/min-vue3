@@ -2,18 +2,26 @@ export let effectActive: InstanceType<typeof ReactiveEffect> | null;
 
 class ReactiveEffect {
   public _deps: Set<Set<InstanceType<typeof ReactiveEffect>>>;
+  public active: Boolean;
   constructor(public fn: Function, public options?: any) {
     this.fn = fn;
     this.options = options;
     this._deps = new Set();
+    this.active = false; // 防止stop后直接调run还会重新收集依赖的问题
   }
   run() {
+    //如果active为true代表已经调过stop方法了,这个时候应该不需要赋值effectActive
+    if (this.active) {
+      this.fn();
+      return;
+    }
     effectActive = this;
     const res = this.fn();
     effectActive = null;
     return res;
   }
   stop() {
+    this.active = true;
     if (this._deps.size > 0) {
       this._deps.forEach((dep) => {
         dep.delete(this);
