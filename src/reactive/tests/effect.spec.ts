@@ -66,6 +66,7 @@ describe("first", () => {
     });
     obj.prop = 2;
     expect(dummy).toBe(2);
+    //调用stop后，effect类会把自己从依赖收集器中移除，这样当响应式对象变化的时候，不会再执行这个effect的函数
     stop(runner);
     obj.prop++;
     expect(dummy).toBe(2);
@@ -79,6 +80,7 @@ describe("first", () => {
     });
     const onStop = jest.fn();
     let dummy;
+    //每次调用stop的时候,都会执行onStop
     const runner = effect(
       () => {
         dummy = obj.foo;

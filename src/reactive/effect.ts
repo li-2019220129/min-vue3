@@ -1,6 +1,6 @@
 export let effectActive: InstanceType<typeof ReactiveEffect> | null;
 
-class ReactiveEffect {
+export class ReactiveEffect {
   public _deps: Set<Set<InstanceType<typeof ReactiveEffect>>>;
   public active: Boolean;
   constructor(public fn: Function, public options?: any) {
