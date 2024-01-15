@@ -1,4 +1,4 @@
-import { createGetter, createSetter } from "./utils";
+import { createGetter, createSetter, isObject } from "./utils";
 
 const get = createGetter();
 const readonlyGet = createGetter(true);
@@ -31,5 +31,9 @@ export function readonly<T extends Object>(obj: T): T {
 }
 
 export function shallowReadonly<T extends Object>(obj: T): T {
+  if (!isObject(obj)) {
+    console.warn(`target is not an object`);
+    return obj;
+  }
   return new Proxy(obj, shallowReadonlyHandles) as T;
 }
