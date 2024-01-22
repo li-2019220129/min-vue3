@@ -11,8 +11,6 @@ export function initSlots(instance: any, children: any) {
         Array.isArray(value(props)) ? value(props) : [value(props)];
     }
     instance.slots = slots;
-  } else {
-    console.warn("不合法的slots");
   }
   //   instance.slots = Array.isArray(children) ? children : [children];
 }

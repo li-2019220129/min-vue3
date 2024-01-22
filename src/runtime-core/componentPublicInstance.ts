@@ -13,6 +13,6 @@ export const PublicInstanceProxyHandle = {
     if (mapObject) {
       return mapObject(instance);
     }
-    return instance.setupState?.[key] || instance.props?.[key];
+    return instance.setupState?.[key] ?? instance.props?.[key];
   },
 };

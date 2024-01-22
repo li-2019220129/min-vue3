@@ -20,6 +20,7 @@ export const App = {
         h(Foo, {
           count: 1,
         }),
+        h("span", {}, "888888"),
       ]
     );
   },

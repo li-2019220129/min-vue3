@@ -7,7 +7,6 @@ export function emit(instance: any, event: any, ...args: any[]) {
     return str ? "on" + capilalize(str) : "";
   };
   const handleName = toHandlerKey(event);
-  console.log(handleName, "toHandleey");
 
   const handler = props[handleName];
   handler && handler(...args);

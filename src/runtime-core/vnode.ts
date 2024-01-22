@@ -1,6 +1,9 @@
 import { isObject } from "../reactive/utils";
 import { ShapeFlags } from "../shared/index";
 
+export const Fragment = Symbol("Fragment");
+export const Text = Symbol("Text");
+
 export function createVNode(type: any, props?: any, children?: any) {
   const vnode = {
     type,
@@ -20,6 +23,10 @@ export function createVNode(type: any, props?: any, children?: any) {
     }
   }
   return vnode;
+}
+
+export function createTextVNode(text: string) {
+  return createVNode(Text, {}, text);
 }
 
 function getShapeFlag(type: any) {
