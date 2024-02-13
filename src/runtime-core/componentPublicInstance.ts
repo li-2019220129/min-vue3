@@ -13,6 +13,7 @@ export const PublicInstanceProxyHandle = {
     if (mapObject) {
       return mapObject(instance);
     }
+    //这块不能用 || ,因为考虑到有0的情况,所以要使用空值运算符 ??，特殊的情况做特殊处理
     return instance.setupState?.[key] ?? instance.props?.[key];
   },
 };

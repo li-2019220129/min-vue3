@@ -46,7 +46,7 @@ export const App = {
         ...this.props,
       },
       [
-        h("div", {}, "count:" + this.count),
+        h("div", {}, "count:" + this.count), //触发依赖收集
         h(
           "button",
           {

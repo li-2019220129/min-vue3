@@ -12,8 +12,10 @@ export function createComponentInstance(vnode: any, parent: any) {
     props: {},
     emit: () => {},
     slots: {},
+    isMounted: false,
     provides: parent ? parent.provides : {}, //获取 parent 的 provides 作为当前组件的初始化值 这样就可以继承 parent.provides 的属性了
     parent,
+    subTree: {},
     setupState: {},
   };
   component.emit = emit.bind(null, component) as any;
