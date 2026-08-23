@@ -18,7 +18,6 @@ class RefImpl {
     this._value = toReactive(rawValue);
   }
   get value() {
-    debugger;
     trackRefValue(this);
     return this._value;
   }

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>嵌套 IFrame 转图片</title>
+    <style>
+        #container {
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            height: 100vh;
+        }
+        #output {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform-origin: center center;
+        }
+        #captureBtn {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            font-size: 20px;
+            padding: 10px 20px;
+            border: 2px solid #000;
+            background-color: #fff;
+            cursor: pointer;
+
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+</head>
+<body>
+    <div id="container">
+        <iframe id="childIframe" src="child.html" width="100%" height="100%" style="border: none;"></iframe>
+        <canvas id="output"></canvas>
+    </div>
+    <button id="captureBtn">转为图片</button>
+
+    <script>
+        const captureBtn = document.getElementById('captureBtn');
+        const outputCanvas = document.getElementById('output');
+        const container = document.getElementById('container');
+
+        captureBtn.addEventListener('click', () => {
+            const iframe = document.getElementById('childIframe');
+
+            html2canvas(iframe.contentWindow.document.body).then(canvas => {
+                outputCanvas.width = canvas.width;
+                outputCanvas.height = canvas.height;
+                const ctx = outputCanvas.getContext('2d');
+                ctx.drawImage(canvas, 0, 0);
+            });
+        });
+
+        // 双指缩放
+        const hammer = new Hammer(container);
+        let scale = 1;
+
+        hammer.get('pinch').set({ enable: true });
+
+        hammer.on('pinch', (ev) => {
+            scale *= ev.scale;
+            outputCanvas.style.transform = `scale(${scale})`;
+        });
+    </script>
+</body>
+</html>
