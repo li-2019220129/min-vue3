@@ -53,23 +53,34 @@ const proxyNum = new Proxy(num, {});   // 💥 TypeError: 不能代理原始值
     Vue 的答案：<b>既然原始值装不上「门禁」，那就给它盖一座房子（对象），把值锁进
     <code class="inline">.value</code> 这个房间里</b> —— 房子是对象，能装门禁了：
   </p>
-  <pre class="code" data-title="packages/reactivity/src/ref.ts"><code>class RefImpl {
-  __v_isRef = true;                 // 身份标识（和 IS_REACTIVE 暗号异曲同工）
-  private _value;
-  public dep = createDep(() => (this.dep = undefined), "ref");
-                                    // ref 自带一个专属 dep（不用三层名册了！）
-  constructor(public rawValue) {
-    this._value = toReactive(rawValue);   // 对象值 → 转成 reactive（ref 也能套娃！）
+  <pre class="code" data-title="官方 3.5 ref.ts（节选）"><code>class RefImpl&lt;T = any&gt; {
+  _value: T                        // 缓存的值（对象值存的是 reactive 代理）
+  private _rawValue: T             // 原始值（比较用，永远是「裸」的）
+  dep: Dep = new Dep()             // ⭐ 专属 dep：一个 Dep 实例，不用三层名册
+  public readonly [ReactiveFlags.IS_REF] = true
+  public readonly [ReactiveFlags.IS_SHALLOW]: boolean = false
+
+  constructor(value: T, isShallow: boolean) {
+    this._rawValue = isShallow ? value : toRaw(value)
+    this._value = isShallow ? value : toReactive(value)   // 对象值 → 转成 reactive（ref 也能套娃！）
+    this[ReactiveFlags.IS_SHALLOW] = isShallow
   }
+
   get value() {
-    trackRefValue(this);            // 读 .value → 登记（比 track 三层查找还快）
-    return this._value;
+    this.dep.track()               // 读 .value → 登记到专属 dep（和普通 track 同一套 Link 机制）
+    return this._value
   }
+
   set value(newValue) {
-    if (newValue !== this.rawValue) {    // 值没变不折腾（和 set 拦截器同理）
-      this.rawValue = newValue;
-      this._value = newValue;            // ⚠️ 注意这里（见本章彩蛋找茬）
-      triggerRefValue(this);             // → 通知所有登记的 effect
+    const oldValue = this._rawValue
+    // shallowRef、新值本身是 shallow/readonly → 不做深层转换
+    const useDirectValue =
+      this[ReactiveFlags.IS_SHALLOW] || isShallow(newValue) || isReadonly(newValue)
+    newValue = useDirectValue ? newValue : toRaw(newValue)
+    if (hasChanged(newValue, oldValue)) {          // ⭐ Object.is 比较（NaN 安全，5.2）
+      this._rawValue = newValue
+      this._value = useDirectValue ? newValue : toReactive(newValue)   // ⭐ 新值也要响应式化！
+      this.dep.trigger()           // → version++ → notify（5.6 同一条管线）
     }
   }
 }</code></pre>
@@ -92,47 +103,77 @@ const proxyNum = new Proxy(num, {});   // 💥 TypeError: 不能代理原始值
     解构相当于把值「抄」出来一份普通变量，和原对象断联。
     <code class="inline">toRefs</code> 的解法是不抄值，改发「引用卡片」：
   </p>
-  <pre class="code" data-title="packages/reactivity/src/ref.ts"><code>class ObjectRefImpl {
-  __v_isRef = true;
-  constructor(public _object, public _key) {}   // 只记住：哪个对象 + 哪个 key
+  <pre class="code" data-title="官方 3.5 ref.ts（节选）"><code>class ObjectRefImpl&lt;T extends object, K extends keyof T&gt; {
+  public readonly [ReactiveFlags.IS_REF] = true
+  private readonly _raw: T
+  private readonly _key: K
+  private readonly _shallow: boolean
 
-  get value()    { return this._object[this._key]; }  // 读：实时去原对象拿
-  set value(v)   { this._object[this._key] = v; }     // 写：实时写回原对象
-}
-
-export function toRef(object, key) {
-  return new ObjectRefImpl(object, key);        // 一张「引用卡片」
-}
-
-export function toRefs(object) {
-  const res = {};
-  for (let key in object) {
-    res[key] = toRef(object, key);              // 整包对象 → 一沓卡片
+  constructor(private readonly _object: T, key: K, private readonly _defaultValue?) {
+    this._key = key
+    this._raw = toRaw(_object)
+    // 判断「读到的值要不要自动脱 ref 壳」：沿代理链逐层检查 shallow
+    let shallow = true
+    let obj = _object
+    if (!isArray(_object) || !isIntegerKey(this._key)) {
+      do { shallow = !isProxy(obj) || isShallow(obj) } while (shallow &amp;&amp; (obj = obj[ReactiveFlags.RAW]))
+    }
+    this._shallow = shallow
   }
-  return res;
+
+  get value() {
+    let val = this._object[this._key]   // 读：实时去原对象拿
+    if (this._shallow) val = unref(val) // 浅层代理上的 ref 要手动脱壳
+    return (this._value = val === undefined ? this._defaultValue! : val)
+  }
+
+  set value(newVal) {
+    if (this._shallow &amp;&amp; isRef(this._raw[this._key])) {
+      const nestedRef = this._object[this._key]   // 写到 ref 头上 → 走 ref 的 setter
+      if (isRef(nestedRef)) { nestedRef.value = newVal; return }
+    }
+    this._object[this._key] = newVal    // 写：实时写回原对象
+  }
+
+  get dep(): Dep | undefined {          // 卡片也能被依赖追踪：
+    return getDepFromReactive(this._raw, this._key)  // 透传源属性的 dep
+  }
+}
+
+export function toRefs&lt;T extends object&gt;(object: T) {
+  const ret: any = isArray(object) ? new Array(object.length) : {}
+  for (const key in object) {
+    ret[key] = propertyToRef(object, key)   // 整包对象 → 一沓卡片
+  }
+  return ret
 }</code></pre>
-  <p>注意 ObjectRefImpl 的 get/set 里<b>没有任何 track/trigger</b> —— 它只是个转发器，
+  <p>注意 ObjectRefImpl 的 get/set 本质上是<b>转发器</b> ——
     真正的登记发生在 <code class="inline">this._object[this._key]</code> 这次「读取原响应式对象」的时候。
-    代理的代理，轻装上阵。</p>
+    它自己的 <code class="inline">get dep()</code> 只是帮依赖系统找到「源属性那张名册」——
+    卡片和源属性共享同一本账。代理的代理，轻装上阵。</p>
 
   <h2>7.3 proxyRefs：模板里为什么不用写 .value</h2>
   <p>setup 返回的对象会被 <code class="inline">proxyRefs</code> 包一层：</p>
-  <pre class="code" data-title="packages/reactivity/src/ref.ts"><code>export function proxyRefs(object) {
-  return new Proxy(object, {
-    get(target, key, receiver) {
-      const res = Reflect.get(target, key, receiver);
-      return res.__v_isRef ? res.value : res;   // 读到 ref？自动帮你拆箱！
-    },
-    set(target, key, value, receiver) {
-      const oldValue = target[key];
-      if (oldValue.__v_isRef) {
-        oldValue.value = value;                 // 写到 ref 身上？自动装箱！
-        return true;
-      } else {
-        return Reflect.set(target, key, value, receiver);
-      }
-    },
-  });
+  <pre class="code" data-title="官方 3.5 ref.ts"><code>const shallowUnwrapHandlers: ProxyHandler&lt;any&gt; = {
+  get: (target, key, receiver) =>
+    key === ReactiveFlags.RAW
+      ? target
+      : unref(Reflect.get(target, key, receiver)),   // 读到 ref？自动帮你拆箱！
+  set: (target, key, value, receiver) => {
+    const oldValue = target[key]
+    if (isRef(oldValue) && !isRef(value)) {
+      oldValue.value = value                // 写到 ref 身上？自动装箱！
+      return true
+    } else {
+      return Reflect.set(target, key, value, receiver)
+    }
+  },
+}
+
+export function proxyRefs&lt;T extends object&gt;(objectWithRefs: T) {
+  return isReactive(objectWithRefs)
+    ? objectWithRefs                        // 已经是 reactive：自带脱壳，不重复包
+    : new Proxy(objectWithRefs, shallowUnwrapHandlers)
 }</code></pre>
   <p>
     所以 <code class="inline">count</code> 在模板里直接用，<code class="inline">count = 5</code> 直接赋值 ——
@@ -140,33 +181,15 @@ export function toRefs(object) {
     这也是为什么 <b>script 里必须写 .value 而模板里不用</b>：两套访问通道而已。
   </p>
 
-  <div class="callout warn">
-    <span class="tag">🔍 彩蛋找茬：源码里的一个小瑕疵</span><br>
-    看回 RefImpl 的 set：<code class="inline">this._value = newValue</code> 直接赋值，
-    <b>没有再过一次 toReactive</b>。假如你 <code class="inline">ref({a:1})</code> 后又
-    <code class="inline">myRef.value = {b:2}</code>，新对象会以<b>裸对象</b>身份存进 _value，
-    它的属性读写将失去响应！官方源码里这行是 <code class="inline">this._value = toReactive(newValue)</code>。
-    修掉它，就当是本项目留给你的第一道实战题 😏
-  </div>
-
-  
-  <h2>7.4 官方 ref 的三个细节：本项目没写、但值得知道</h2>
-  <p>对照官方 <code class="inline">ref.ts</code>，有三个工程细节被本项目简化掉了，每一个都有讲究：</p>
+  <h2>7.4 官方 ref 的三个工程细节</h2>
+  <p>官方 <code class="inline">ref.ts</code> 里有三个值得咀嚼的细节，每一个都对应一类真实 bug：</p>
   <table>
-    <tr><th>细节</th><th>本项目</th><th>官方做法</th><th>为什么</th></tr>
-    <tr><td>dep 的形态</td><td><code class="inline">createDep</code>（Map 挂属性）</td><td>3.5 起是一个 <code class="inline">Dep</code> 类实例，类字段直接初始化（3.2~3.4 曾是「第一次被 track 才惰性创建」）</td><td>统一全家的 dep 结构；<code class="inline">sc</code> 订阅者计数归零时自动销户，防泄漏</td></tr>
-    <tr><td>新值的响应式化</td><td><code class="inline">this._value = newValue</code><br><small>（对象值不再转代理 ⚠️）</small></td><td><code class="inline">this._value = toReactive(newValue)</code></td><td>保证 <code class="inline">ref(obj).value.x</code> 每次替换后仍是响应式 —— 第 51 章彩蛋的 PR 点</td></tr>
-    <tr><td>主动触发</td><td>—</td><td><code class="inline">triggerRef(ref)</code></td><td>浅层 ref（shallowRef）改了深层也想通知时用（第 11 章）</td></tr>
+    <tr><th>细节</th><th>官方做法</th><th>为什么</th></tr>
+    <tr><td>dep 的形态</td><td>3.5 起是一个 <code class="inline">Dep</code> 类实例，类字段直接初始化（3.2~3.4 曾是「第一次被 track 才惰性创建」）</td><td>统一全家的 dep 结构；<code class="inline">sc</code> 订阅者计数归零时自动销户，防泄漏</td></tr>
+    <tr><td>新值的响应式化</td><td><code class="inline">this._value = toReactive(newValue)</code> —— 每次赋值都过一遍</td><td>保证 <code class="inline">ref(obj).value.x</code> 每次替换后仍是响应式（见 7.5 的坑）</td></tr>
+    <tr><td>读写分离两本值</td><td><code class="inline">_rawValue</code>（比较用）与 <code class="inline">_value</code>（返回用）分开存</td><td>比较要在「裸值」上做（代理 !== 原对象），返回要给「代理」—— 一份值两个视图</td></tr>
   </table>
-  <div class="callout warn">
-    <span class="tag">⚠️ 回看本章源码里的那个坑</span><br>
-    set 拦截器里 <code class="inline">this._value = newValue</code> 少了一次 toReactive ——
-    意味着 <code class="inline">const r = ref({ a: 1 })</code> 之后执行
-    <code class="inline">r.value = { a: 2 }</code>，新对象的 <code class="inline">a</code> 就不是响应式了。
-    动手修掉它（抄 7.1 源码构造器里那一行），你就完成了本项目第一个真正有价值的 PR 改动。
-  </div>
 
-  
   <div class="callout warn">
     <span class="tag">⚠️ 模板自动脱壳只对「顶层」生效</span><br>
     setupState 被 proxyRefs 包过（7.3），所以模板里 <code class="inline">{{ count }}</code> 自动脱壳；
@@ -176,25 +199,19 @@ export function toRefs(object) {
     官方文档 Top 3 新手困惑之一 —— 现在你从实现层面理解它了。
   </div>
 
-  <h2>7.4 找茬时间到：setter 里丢失的 toReactive</h2>
-  <p>第 1 章彩蛋埋的雷，现在拆掉它。看本项目 RefImpl 的 setter：</p>
-  <pre class="code" data-title="有 bug 的版本（本项目现状）"><code>set value(newValue) {
-  if (newValue !== this.rawValue) {
-    this.rawValue = newValue;
-    this._value = newValue;        // ⚠️ 直接赋值 —— 如果 newValue 是对象呢？
-    triggerRefValue(this);
-  }
-}</code></pre>
-  <pre class="code" data-title="复现与修复"><code>const r = ref({ name: "a" });
+  <h2>7.5 官方 setter 防的那个坑：替换对象值后失去响应</h2>
+  <p>看官方 setter 里那行 <code class="inline">this._value = toReactive(newValue)</code> —— 为什么「再过一次 toReactive」值得单独讲？因为少了它就是一个经典 bug：</p>
+  <pre class="code" data-title="假如没有这一行（教学简化版历史版本的真实教训）"><code>// 反面教材：set 里直接 this._value = newValue
+const r = ref({ name: "a" });
 r.value = { name: "b" };
 r.value.name = "c";   // 期望页面更新，实际不更新 ✗
 // 原因：新的 { name: "b" } 没有被 reactive() 包一层，深层读取不经过 Proxy
 
-// 官方修复（ref.ts 原文）：
+// 官方的防御（ref.ts 原文）：
 this._value = toReactive(newValue);   // 对象 → 代理；原始值 → 原样
 // toReactive 就是 reactive.ts 里那三行：isObject ? reactive(v) : v</code></pre>
-  <p>修完别忘了测试用例 —— 提 PR 的标准姿势：</p>
-  <pre class="code" data-title="__tests__/ref.spec.ts"><code>it("should keep reactivity of replaced object value", () =&gt; {
+  <p>这类「替换值之后响应链断裂」的问题，标准防法就是官方这样在 setter 里重新响应式化 —— 配上测试用例才算闭环：</p>
+  <pre class="code" data-title="官方仓库同款测试（__tests__/ref.spec.ts 风格）"><code>it("should keep reactivity of replaced object value", () =&gt; {
   const r = ref({ name: "a" });
   r.value = { name: "b" };
   expect(isReactive(r.value)).toBe(true);   // ⭐ 断言新值仍是响应式
@@ -242,7 +259,7 @@ this._value = toReactive(newValue);   // 对象 → 代理；原始值 → 原�
   <h1>computed：聪明的偷懒</h1>
   <p class="lead">
     computed 的全部哲学浓缩成四个字：<b>能不算就不算</b>。
-    它靠一个布尔值（dirty 脏标记）统治了整个缓存王国，而且 —— 你已经认识它的全部零件了。
+    它靠「版本号对账」统治了整个缓存王国（2.5 节的记账思想在这里全面展开），而且 —— 你已经认识它的全部零件了。
   </p>
 
   <h2>8.1 比喻先行：冰箱里的牛奶</h2>
@@ -252,38 +269,88 @@ this._value = toReactive(newValue);   // 对象 → 代理；原始值 → 原�
     「保质期状态」就是 dirty 标记；「牛奶过期」= 依赖变了。
   </p>
 
-  <h2>8.2 源码：ComputedRefImpl</h2>
-  <pre class="code" data-title="packages/reactivity/src/computed.ts"><code>class ComputedRefImpl {
-  public _value;        // 缓存的结果（牛奶）
-  public effect;        // 内部藏着一个 ReactiveEffect（去超市的腿）
-  public dep;           // 自己也发卡片：别人可以依赖我这个 computed！
+  <h2>8.2 源码：ComputedRefImpl —— computed 自己就是「订阅者」</h2>
+  <pre class="code" data-title="官方 3.5 computed.ts（节选）"><code>export class ComputedRefImpl&lt;T = any&gt; implements Subscriber {
+  _value: any = undefined           // 缓存的结果（牛奶）
+  readonly dep: Dep = new Dep(this) // 自己的 dep，并告诉它「我是 computed」
+  deps?: Link = undefined           // 我订阅上游的登记线（Link 双向链）
+  depsTail?: Link = undefined
+  flags: EffectFlags = EffectFlags.DIRTY   // 初始：没算过 = 脏
+  globalVersion: number = globalVersion - 1
+  isSSR: boolean
+  next?: Subscriber = undefined     // batch 队列指针
+  effect: this = this               // 兼容旧插件（3.5 起不再包 ReactiveEffect）
 
-  constructor(public getter, public setter) {
-    this.effect = new ReactiveEffect(
-      () => getter(this._value),          // 真正干活的：执行你的 getter
-      () => { triggerRefValue(this); }    // ⭐ 自定义 scheduler：依赖变了只「通知下游」
-    );                                    //    而不是立刻重算！
+  constructor(
+    public fn: ComputedGetter&lt;T&gt;,              // 你的 getter
+    private readonly setter: ComputedSetter&lt;T&gt; | undefined,
+    isSSR: boolean,
+  ) {}
+
+  notify(): true | void {           // 上游变了 → 被 dep.notify 叫到
+    this.flags |= EffectFlags.DIRTY          // ① 只标脏，绝不重算！
+    if (!(this.flags &amp; EffectFlags.NOTIFIED) &amp;&amp; activeSub !== this) {
+      batch(this, true)                      // ② 登记进「computed 批队列」
+      return true                            // ③ 返回 true → 调用方继续传播我的 dep
+    }
   }
 
-  get value() {
-    if (this.effect.dirty) {              // 牛奶过期了吗？
-      this._value = this.effect.run();    //   过期 → 重新计算 &amp; 存冰箱
-      trackRefValue(this);                //   同时让「读我的人」也能登记依赖我
-    }
-    return this._value;                   // 没过期 → 直接喝（零计算）
+  get value(): T {
+    const link = this.dep.track()      // ① 谁读我，登记谁（和普通 ref 同一套机制）
+    refreshComputed(this)              // ② 该算才算（见下）
+    if (link) link.version = this.dep.version
+    return this._value                 // ③ 没脏 → 直接喝（零计算）
   }
 
   set value(newValue) {
-    this.setter(newValue);                // 可写 computed（{get,set} 传参那个）
+    if (this.setter) this.setter(newValue)   // 可写 computed（{get,set} 传参那个）
+    else if (__DEV__) warn('Write operation failed: computed value is readonly')
   }
 }
 
-export function computed(getterOptions) {
-  let onlyGetter = isFunction(getterOptions);
-  return new ComputedRefImpl(
-    onlyGetter ? getterOptions : getterOptions.get,   // 支持两种传参
-    onlyGetter ? () => {}    : getterOptions.set || (() => {})
-  );
+/*@__NO_SIDE_EFFECTS__*/
+export function computed&lt;T&gt;(getterOrOptions, debugOptions?, isSSR = false) {
+  let getter: ComputedGetter&lt;T&gt;
+  let setter: ComputedSetter&lt;T&gt; | undefined
+  if (isFunction(getterOrOptions)) {
+    getter = getterOrOptions                      // 只传函数 → 只读
+  } else {
+    getter = getterOrOptions.get                  // 传 {get,set} → 可写
+    setter = getterOrOptions.set
+  }
+  const cRef = new ComputedRefImpl(getter, setter, isSSR)
+  return cRef as any
+}</code></pre>
+  <p>
+    官方 3.5 里 computed 的身份变了：<b>它不再内部包一个 ReactiveEffect，自己就直接实现
+    Subscriber 接口</b>（deps 链、flags、notify —— 和 ReactiveEffect 同款）。
+    它既是 dep 的订阅者（订阅上游），又拥有自己的 dep（被下游订阅）—— 双面身份写进了同一个类。
+    真正的「要不要重算」判决在 <code class="inline">refreshComputed</code>：
+  </p>
+  <pre class="code" data-title="官方 3.5 effect.ts：refreshComputed（节选）"><code>export function refreshComputed(computed: ComputedRefImpl): undefined {
+  if (computed.flags &amp; TRACKING &amp;&amp; !(computed.flags &amp; DIRTY)) return  // 干净 → 秒回
+  if (computed.globalVersion === globalVersion) return                // ⭐ 全局快路径：
+  computed.globalVersion = globalVersion                              //   世界没变过，谁都别算
+  if (!computed.isSSR &amp;&amp; computed.flags &amp; EVALUATED &amp;&amp; !isDirty(computed)) {
+    return                              // 逐条对账：没有一条 link 的版本对不上 → 缓存仍然新鲜
+  }
+  computed.flags |= RUNNING
+  const dep = computed.dep
+  const prevSub = activeSub
+  activeSub = computed                  // ⭐ getter 执行期间，computed 是「当前订阅者」
+  try {
+    prepareDeps(computed)               // 旧线置 -1（第 6 章）
+    const value = computed.fn(computed._value)   // ⭐ 真正执行你的 getter（全站最懒的一行）
+    if (dep.version === 0 || hasChanged(value, computed._value)) {
+      computed.flags |= EVALUATED
+      computed._value = value           // 缓存新值
+      dep.version++                     // ⭐ 值真变了才记账（值没变不涨，下游连重跑都省）
+    }
+  } finally {
+    activeSub = prevSub
+    cleanupDeps(computed)
+    computed.flags &amp;= ~RUNNING
+  }
 }</code></pre>
 
   <h2>8.3 三方博弈：一次完整的「账单」</h2>
@@ -300,16 +367,17 @@ export function computed(getterOptions) {
   </div>
   <p>现在推演 <code class="inline">count.value++</code> 会发生什么：</p>
   <ol>
-    <li>count 的 dep 触发 → 找到 computed.effect → <b>但它有自定义 scheduler</b> → 不重算，只做两件事：
-      把自己标脏（其实 triggerEffects 里对 dirtyLevel 的标记已完成这一半）+ <code class="inline">triggerRefValue</code> 通知订阅「我」的下游 effect</li>
+    <li>count 的 dep 触发 → notify 沿订阅者链找到 computed → 走到 <code class="inline">ComputedRefImpl.notify()</code> →
+      <b>只标脏（DIRTY）+ 进 batch</b>，绝不重算；notify 返回 true → 继续传播 computed 自己的 dep</li>
     <li>下游 effect 重跑 → 执行渲染 → 过程中读到 <code class="inline">double.value</code></li>
-    <li>double 发现自己 dirty → <b>此刻才真正执行 getter</b>（最晚一秒是一秒的懒）→ 缓存新值 → dirty 复位</li>
+    <li><code class="inline">refreshComputed</code>：DIRTY 已标 → 逐条对账 → 真脏 → <b>此刻才执行 getter</b>
+      （最晚一秒是一秒的懒）→ 缓存新值；<b>值没变就不涨 version</b></li>
   </ol>
   <div class="callout deep">
     <span class="tag">🧠 精妙之处：懒计算的传播链</span><br>
     脏标记像多米诺骨牌一样<b>传播</b>：count 变 → double 标脏 → 下游 effect 重跑 → 读 double → 才触发计算。
     如果下游永远不来读，getter <b>永远不执行</b>。一个 computed 依赖另一个 computed 时同理 ——
-    骨牌可以无限接力，计算永远推迟到「真正需要」的那一刻。这就是脏标记算法的威力。
+    骨牌可以无限接力，计算永远推迟到「真正需要」的那一刻。这就是「读取时结账」算法的威力。
   </div>
 
   <h2>8.4 🧪 实验：偷懒现场抓拍</h2>
@@ -346,9 +414,9 @@ effect(() => { view = double.value; });   // 页面渲染依赖 double</code></p
   
   <h2>8.5 computed 三问三答：写入、级联与 methods 对比</h2>
   <p><b>① computed 能被写入吗？</b>能 —— <code class="inline">computed({ get, set })</code> 传对象时，
-  <code class="inline">fullName.value = "李 四"</code> 会走 setter（本仓库源码里的
-  <code class="inline">getterOptions.get / .set</code> 分支），setter 里你负责反写上游数据。
-  只传函数时 setter 是空函数，写入无效（开发模式会警告）。</p>
+  <code class="inline">fullName.value = "李 四"</code> 会走 setter（8.2 源码里的
+  <code class="inline">isFunction(getterOrOptions)</code> 分支之外的那条路），setter 里你负责反写上游数据。
+  只传函数时 setter 是 undefined，写入无效（开发模式警告 readonly）。</p>
   <p><b>② computed 互相依赖会怎样？</b></p>
   <div class="diagram">
     <div class="flow">
@@ -385,9 +453,9 @@ effect(() => { view = double.value; });   // 页面渲染依赖 double</code></p
       但业务状态流尽量保持「源数据 → computed 派生」单向 —— 可写 computed 会让数据流向难追。</li>
   </ol>
 
-  <h2>8.6 本项目 vs 官方 computed：三点差异</h2>
+  <h2>8.6 教学简化版 vs 官方 computed：三点差异</h2>
   <table>
-    <tr><th>维度</th><th>本项目</th><th>官方（3.5）</th></tr>
+    <tr><th>维度</th><th>教学简化版</th><th>官方（3.5）</th></tr>
     <tr><td>身份</td><td>computed 内部藏一个 ReactiveEffect</td><td>ComputedRefImpl 自己就是「订阅者」（Subscriber），不再包 effect（保留 <code class="inline">effect</code> 字段只为兼容旧插件）</td></tr>
     <tr><td>脏判定</td><td>两档布尔：0 / 4（脏/干净）</td><td>版本号对账：逐条比对 <code class="inline">link.dep.version !== link.version</code>，外加全局 <code class="inline">globalVersion</code> 快路径（2.5 节）</td></tr>
     <tr><td>重算时机</td><td>读 .value 时发现脏才重算</td><td>同款「读取时结账」，且<b>算完值没变就不涨 version</b>（hasChanged 才 +1）—— 下游连重跑都省了</td></tr>
@@ -424,12 +492,12 @@ fullName.value = "张 三";   // setter 执行 → 拆回两个源 ref
     结合 2.5 的版本号记账理解官方行为：C1 的 getter 重算后<b>值真变了</b>，它的 dep.version 才 +1，
     才会把 C2 标脏；真正读 C2 时 isDirty 再逐条对账 —— 若 C1 只是「被标脏」但重算后<b>值没变</b>，
     version 不增长，C2 直接复用缓存，<b>连整条链的重算都省了</b>（这正是 3.5 修掉的
-    「computed 值未变仍触发下游」顽疾）。本项目两档脏标记的简化版在链式场景会多算一次，但主干正确。
+    「computed 值未变仍触发下游」顽疾）。教学简化版两档脏标记在链式场景会多算一次，但主干正确。
   </p>
   <div class="callout warn">
     <span class="tag">⚠️ 一条红线：computed 里不要改自己依赖的数据</span><br>
-    computed 的 effect 也会被登记进 dep（它也是「读者」）。getter 里写
-    <code class="inline">count.value++</code> 就是「读的途中改」—— 第 5 章 _running 防线拦得住直接死循环，
+    computed 的求值期间也是「当前订阅者」（refreshComputed 里 activeSub = computed）。getter 里写
+    <code class="inline">count.value++</code> 就是「读的途中改」—— notify 的 RUNNING 防线拦得住直接死循环，
     但仍会触发「算一次改一次」的隐式循环，并最终撞上第 23 章的 100 层递归上限警告。
     纪律一句话：<b>getter 纯函数，一切变更放事件/回调里。</b>
   </div>
@@ -441,8 +509,8 @@ fullName.value = "张 三";   // setter 执行 → 拆回两个源 ref
          2. computed 能被另一个 computed 依赖吗？依赖链上的脏标记怎么传播？</p>
       <div class="ans">
         <b>答案：</b><br>
-        1. 没有。scheduler 只做「标脏 + 通知下游」；getter 被推迟到<b>下一次有人读 .value 且发现 dirty</b> 时才执行 —— 懒到了极致。<br>
-        2. 可以。computed 的 get value 里有 <code class="inline">trackRefValue(this)</code>，它读起来和普通 ref 一模一样，所以能无限嵌套；上游变 → 中间层标脏并通知 → 下游重跑 → 读中间层 → 中间层才重算（又触发它读上游）。脏标记沿链传播，计算沿链逆向推迟。
+        1. 没有。notify 只做「标脏 + 传播」；getter 被推迟到<b>下一次有人读 .value 且对账为脏</b>时才执行（refreshComputed）—— 懒到了极致。<br>
+        2. 可以。computed 的 get value 里有 <code class="inline">this.dep.track()</code>，它读起来和普通 ref 一模一样，所以能无限嵌套；上游变 → 中间层标脏并传播 → 下游重跑 → 读中间层 → refreshComputed 对账后才重算（又触发它读上游）。脏标记沿链传播，计算沿链逆向推迟。
       </div>
     </div>
   </details>
@@ -464,21 +532,39 @@ fullName.value = "张 三";   // setter 执行 → 拆回两个源 ref
   </p>
 
   <h2>9.1 三种形态，归一为 getter</h2>
-  <p>watch 的 source 可以是响应式对象、ref、函数。doWatch 第一步就是把它们统一成 getter
-    （官方 3.5 起 <code class="inline">apiWatch.ts</code> 已改名 <code class="inline">watch.ts</code> 并从 runtime-core 移入 reactivity 包，搜源码别迷路）：</p>
-  <pre class="code" data-title="packages/reactivity/src/apiWatch.ts"><code>function doWatch(source, cb, { deep, immediate } = { deep: false, immediate: false }) {
-  const reactiveGetter = (source) =>
-    traverse(source, deep === false ? 1 : undefined);  // 见 9.2
+  <p>watch 的 source 可以是响应式对象、ref、函数。官方 <code class="inline">watch.ts</code>（3.5 起从
+    apiWatch.ts 改名并移入 reactivity 包）第一步就是把它们统一成 getter：</p>
+  <pre class="code" data-title="官方 3.5 watch.ts（节选）"><code>export function watch(source, cb?, options: WatchOptions = EMPTY_OBJ): WatchHandle {
+  const { immediate, deep, once, scheduler, augmentJob, call } = options
 
-  let getter;
-  if (isReactive(source)) {
-    getter = () => reactiveGetter(source);   // 形态① 响应式对象 → 遍历它
-  } else if (isRef(source)) {
-    getter = () => source.value;              // 形态② ref → 直接读 .value
-  } else if (isFunction(source)) {
-    getter = source;                          // 形态③ 函数 → 原样使用
+  const reactiveGetter = (source: object) => {
+    if (deep) return source                                  // deep=true → 后面 traverse 全量点名
+    if (isShallow(source) || deep === false || deep === 0)
+      return traverse(source, 1)                             // 浅层：只点名第一层
+    return traverse(source)                                  // 默认：深度点名（见 9.2）
   }
-  // 不管什么形态，最后都变成「一个函数」，跑在 ReactiveEffect 里
+
+  let getter: () =&gt; any
+  let forceTrigger = false
+  if (isRef(source)) {
+    getter = () =&gt; source.value                    // 形态① ref → 直接读 .value
+    forceTrigger = isShallow(source)               // shallowRef：引用没变也可能内容变了
+  } else if (isReactive(source)) {
+    getter = () =&gt; reactiveGetter(source)          // 形态② 响应式对象 → 遍历它
+    forceTrigger = true                            // 遍历拿到的是同一个对象 → 靠 forceTrigger 强制比较
+  } else if (isArray(source)) {
+    // 形态③ 多源数组 → getter 返回「各自取值」的数组
+    getter = () =&gt; source.map(s =&gt; isRef(s) ? s.value : isReactive(s) ? reactiveGetter(s) : s())
+  } else if (isFunction(source)) {
+    // 形态④ 函数：有 cb 就是纯 getter；没 cb（watchEffect）→ 包一层清理/指针管理
+    getter = cb ? source : () =&gt; { /* 清理 + 切 activeWatcher + source(boundCleanup) */ }
+  }
+
+  if (cb &amp;&amp; deep) {
+    const baseGetter = getter
+    const depth = deep === true ? Infinity : deep  // deep: 3 → 只点 3 层
+    getter = () =&gt; traverse(baseGetter(), depth)
+  }
   ...
 }</code></pre>
 
@@ -488,49 +574,81 @@ fullName.value = "张 三";   // setter 执行 → 拆回两个源 ref
     —— 不读属性就没有 track，那改任何属性都不会触发回调！traverse 的作用就是<b>把对象每个属性都读一遍</b>，
     人为制造 track：
   </p>
-  <pre class="code" data-title="traverse（有删节）"><code>function traverse(source, depth, currentDepth = 0, seen = new Set()) {
-  if (!isObject(source)) return source;
-  if (seen.has(source)) return source;      // 防循环引用：摸过的不再摸
-  seen.add(source);
-  if (depth &amp;&amp; currentDepth &gt;= depth) return source;
-  for (let key in source) {
-    traverse(source[key], depth, currentDepth + 1, seen);  // 递归读取 = 递归登记
+  <pre class="code" data-title="官方 3.5 traverse（有删节）"><code>export function traverse(value: unknown, depth = Infinity, seen?: Map&lt;unknown, number&gt;) {
+  if (depth &lt;= 0 || !isObject(value) || (value as any)[ReactiveFlags.SKIP]) {
+    return value
   }
-  return source;
+  seen = seen || new Map()
+  if ((seen.get(value) || 0) &gt;= depth) return value   // 防循环引用：摸过的不再摸
+  seen.set(value, depth)
+  depth--
+  if (isRef(value)) {
+    traverse(value.value, depth, seen)
+  } else if (isArray(value)) {
+    for (let i = 0; i &lt; value.length; i++) traverse(value[i], depth, seen)
+  } else if (isSet(value) || isMap(value)) {
+    value.forEach((v) =&gt; traverse(v, depth, seen))
+  } else if (isPlainObject(value)) {
+    for (const key in value) traverse(value[key], depth, seen)
+    for (const key of Object.getOwnPropertySymbols(value)) {
+      if (Object.prototype.propertyIsEnumerable.call(value, key)) traverse(value[key], depth, seen)
+    }
+  }
+  return value
 }</code></pre>
   <div class="callout tip">
     <span class="tag">💡 一句话记住</span><br>
     watch 响应式对象 = <b>「先把全家福每个人都点一遍名，以后谁动了都通知我」</b>。
-    traverse 就是点名册。seen 集合防止 <code class="inline">obj.self = obj</code> 这种环把点名变成死循环。
+    traverse 就是点名册。seen 集合防止 <code class="inline">obj.self = obj</code> 这种环把点名变成死循环
+    （官方用 Map 记「每个对象摸到第几层」，比教学简化版的 Set 更精确）。
   </div>
 
   <h2>9.3 job：回调的三个入场券</h2>
-  <pre class="code" data-title="doWatch 的核心（有删节）"><code>let oldValue;
-let clean;
-const onCleanup = (fn) => {                  // 用户注册的「清理上一轮」钩子
-  clean = () => { fn(); clean = undefined; };
-};
-
-let job = () => {
-  if (cb) {
-    let newValue = effect.run();             // 重新执行 getter 拿新值
-    if (clean) clean();                      // 先清理上一轮的过期任务
-    cb(newValue, oldValue, onCleanup);       // 再把新旧值交给用户
-    oldValue = newValue;
-  } else {
-    effect.run();                            // watchEffect：没有回调，直接跑
+  <pre class="code" data-title="官方 3.5 watch.ts（节选）"><code>const job = (immediateFirstRun?: boolean) =&gt; {
+  if (
+    !(effect.flags &amp; EffectFlags.ACTIVE) ||      // 已停止 → 不再触发
+    (!effect.dirty &amp;&amp; !immediateFirstRun)        // ⭐ 脏检查：依赖没变直接跳过
+  ) {
+    return
   }
-};
+  if (cb) {
+    // watch(source, cb)
+    const newValue = effect.run()                // 重新执行 getter 拿新值
+    if (
+      immediateFirstRun || deep || forceTrigger ||
+      (isMultiSource
+        ? (newValue as any[]).some((v, i) =&gt; hasChanged(v, oldValue[i]))
+        : hasChanged(newValue, oldValue))
+    ) {
+      if (cleanup) cleanup()                     // 先清理上一轮注册的钩子
+      const currentWatcher = activeWatcher
+      activeWatcher = effect                     // ⭐ 回调执行期间：activeWatcher = 自己
+      try {
+        cb!(newValue, oldValue, boundCleanup)    // 把新旧值交给用户
+      } finally {
+        activeWatcher = currentWatcher
+      }
+      oldValue = newValue                        // 滚动更新
+    }
+  } else {
+    effect.run()                                 // watchEffect：没有回调，直接跑
+  }
+}
 
-let effect = new ReactiveEffect(getter, job);   // ⭐ 老配方：scheduler = job
+effect = new ReactiveEffect(getter)
+effect.scheduler = scheduler ? () =&gt; scheduler(job, false) : job   // ⭐ scheduler = job
+boundCleanup = fn =&gt; onWatcherCleanup(fn, false, effect)           // 注册进 cleanupMap
+cleanup = effect.onStop = () =&gt; { /* stop 时统一执行 cleanupMap 里的钩子 */ }
+
 if (cb) {
-  if (immediate) job();                        // immediate：先斩后奏，立刻执行一次
-  else oldValue = effect.run();                // 否则：先跑一遍记录初始值
+  if (immediate) job(true)                     // immediate：先斩后奏，立刻执行一次
+  else oldValue = effect.run()                 // 否则：先跑一遍记录初始值
 } else {
-  effect.run();
+  effect.run()
 }</code></pre>
-  <p>注意 watch 的 scheduler 是 <code class="inline">job</code> —— 数据变了不重跑 getter 就完了，
-    而是执行<b>你的回调</b>。这就是第 5 章那张 scheduler 表格里 watch 那一行的落地。</p>
+  <p>注意 watch 的 scheduler 是 <code class="inline">job</code> —— 数据变了不是重跑 getter 就完了，
+    而是先过 <code class="inline">effect.dirty</code> 脏检查，再执行<b>你的回调</b>。
+    这就是第 5 章那张 scheduler 表格里 watch 那一行的落地。</p>
 
   <h2>9.4 onCleanup：解决「过时响应」竞态</h2>
   <p>经典场景：搜索框输入 <code class="inline">"ab"</code>，请求 A 发出；马上又输入 <code class="inline">"abc"</code>，
@@ -542,20 +660,20 @@ if (cb) {
   if (!expired) renderList(result);         // 过期了就丢弃，只有最新一轮能上屏
 });</code></pre>
 
-  <h2>9.5 全家福：三个 API 一种引擎</h2>
+  <h2>9.5 全家福：一个引擎 + 一个双面身份</h2>
   <table>
     <tr><th></th><th>effect</th><th>computed</th><th>watch</th><th>watchEffect</th></tr>
-    <tr><td>内核</td><td>ReactiveEffect</td><td>ReactiveEffect</td><td>ReactiveEffect</td><td>ReactiveEffect</td></tr>
+    <tr><td>内核</td><td>ReactiveEffect</td><td>ComputedRefImpl（自己就是 Subscriber）</td><td>ReactiveEffect</td><td>ReactiveEffect</td></tr>
     <tr><td>fn（getter）</td><td>用户函数</td><td>computed 的 getter</td><td>归一化的 getter</td><td>用户函数</td></tr>
-    <tr><td>scheduler</td><td>直接重跑</td><td>标脏+通知下游</td><td>job → 用户 cb</td><td>重新 run</td></tr>
+    <tr><td>调度</td><td>trigger → runIfDirty</td><td>notify 只标脏，读取时 refreshComputed 结账</td><td>job → 脏检查 → 用户 cb</td><td>重新 run</td></tr>
     <tr><td>首次执行</td><td>立即</td><td>首次读取时</td><td>仅记录 oldValue（immediate 除外）</td><td>立即</td></tr>
   </table>
-  <blockquote>一个 ReactiveEffect，注入不同 fn 与 scheduler，就长出了四个 API。
+  <blockquote>一套 Subscriber/Dep 机制，注入不同 fn 与调度策略，就长出了四个 API。
     好的抽象不是很多概念，而是<b>一个概念用到位</b>。</blockquote>
 
   
   <h2>9.6 回调的执行时机：flush 三档 + deep 的正确用法</h2>
-  <p>官方 watch 还有一个本项目没实现的选项 <code class="inline">flush</code>，它决定回调排在调度器队列的哪一段（第 23 章的工序表）：</p>
+  <p>官方 watch 还有一个教学简化版没实现的选项 <code class="inline">flush</code>，它决定回调排在调度器队列的哪一段（第 23 章的工序表）：</p>
   <table>
     <tr><th>flush</th><th>入队位置</th><th>执行时刻</th><th>典型用途</th></tr>
     <tr><td><code class="inline">'pre'</code>（默认）</td><td>主队列之前</td><td><b>组件重渲染之前</b></td><td>读旧值做比较、操作将要被更新的状态</td></tr>
@@ -576,20 +694,21 @@ if (cb) {
   </div>
   <div class="callout deep">
     <span class="tag">🧠 deep 的两个细节</span><br>
-    ① 本仓库 <code class="inline">traverse(source, deep === false ? 1 : undefined)</code> 的意思是：
-    watch reactive 对象时<b>默认就深</b>（官方同款行为）—— 因为要摸一遍所有层级才能登记到深层属性的 dep；
-    ② 官方还支持 <code class="inline">deep: 3</code> 这种数字：只摸 3 层深 —— 大对象只关心前几层时的精确控制。
-    顺带记住那个彩蛋（第 51 章揭晓）：本仓库 traverse 开头那句
-    <code class="inline">if (isObject(source)) return source</code> 让深层遍历形同虚设，
-    这正是「读源码要动手验证」的最好案例。
+    ① 官方 <code class="inline">reactiveGetter</code> 的逻辑是：watch reactive 对象时<b>默认就深</b> ——
+    因为要摸一遍所有层级才能登记到深层属性的 dep；<code class="inline">deep === false</code> 或
+    <code class="inline">isShallow</code> 才只点名第一层（<code class="inline">traverse(source, 1)</code>）；
+    ② <code class="inline">deep: 3</code> 这种数字：只摸 3 层深 —— 大对象只关心前几层时的精确控制。
+    顺带一个历史彩蛋（第 51 章有档案）：旧教学实现版仓库的 traverse 开头曾有一句写反的
+    <code class="inline">if (isObject(source)) return source</code>，会让深层遍历形同虚设 ——
+    官方实现无此问题，这也是「读源码要动手验证」的最好案例。
   </div>
 
   <h2>9.6 deep / immediate / flush 三个开关在源码里的位置</h2>
   <table>
     <tr><th>开关</th><th>实现位置</th><th>原理</th></tr>
     <tr><td><code class="inline">deep</code></td><td>getter 里的 <code class="inline">traverse(source, depth)</code>（9.2）</td><td>递归摸一遍让每个属性都被 track；depth 限制遍历深度</td></tr>
-    <tr><td><code class="inline">immediate</code></td><td>doWatch 末尾：创建后立刻 <code class="inline">job()</code>，跳过 oldValue 初始化</td><td>首次也执行回调（oldValue = undefined）</td></tr>
-    <tr><td><code class="inline">flush</code></td><td>本项目未实现；官方把 job 包进不同队列</td><td><b>pre</b>（默认）：组件更新前；<b>post</b>：更新后（读 DOM 是新的）；<b>sync</b>：不排队，改一次跑一次</td></tr>
+    <tr><td><code class="inline">immediate</code></td><td>watch 末尾：创建后立刻 <code class="inline">job(true)</code>，跳过 oldValue 初始化</td><td>首次也执行回调（oldValue = undefined）</td></tr>
+    <tr><td><code class="inline">flush</code></td><td>reactivity 包不管这个 —— 由 runtime-core 的 watch 包装层把 job 包进不同队列</td><td><b>pre</b>（默认）：组件更新前；<b>post</b>：更新后（读 DOM 是新的）；<b>sync</b>：不排队，改一次跑一次</td></tr>
   </table>
   <div class="diagram">
     <div class="flow">
@@ -645,13 +764,13 @@ if (cb) {
 // 3.4+ 新增 once：触发一次自动停止 —— 定时启动类逻辑的懒人版
 watch(ready, start, { once: true });</code></pre>
   <p>
-    本项目 doWatch 的 if/else 链只覆盖前三种形态 —— 把数组形态补进去（getter 里一行
+    教学简化版的 if/else 链只覆盖前三种形态 —— 把数组形态补进去（getter 里一行
     <code class="inline">sources.map(...)</code>，cb 传数组），就又向官方对齐了一步。
   </p>
 
   <h2>9.9 3.5 的新玩具：暂停、恢复与更顺手的清理</h2>
   <p>
-    3.5 给 watch 添了三件新装备，本项目都没实现，但原理你已经全学过：
+    3.5 给 watch 添了三件新装备（教学简化版均未实现），原理你已经全学过：
   </p>
   <table>
     <tr><th>新能力</th><th>写法</th><th>背后的机制（本站出处）</th></tr>
@@ -695,7 +814,7 @@ watchHandle.stop   = watchHandle;</code></pre>
   <h1>effect 嵌套与 effectScope</h1>
   <p class="lead">
     组件里面还有组件，effect 里面还有 effect。当它们层层嵌套时，
-    全局唯一的 <code class="inline">activeEffect</code> 指针会不会乱套？
+    全局唯一的 <code class="inline">activeSub</code> 指针会不会乱套？
     本章回答这个问题，并顺手学会 Vue 生态里批量清理的神器 effectScope。
   </p>
 
@@ -709,37 +828,40 @@ watchHandle.stop   = watchHandle;</code></pre>
   renderParentRest();     // 这些读取应该算在 outer 头上
 });</code></pre>
   <p>
-    如果 activeEffect 是「设置后不管」的普通全局变量，inner 跑完把它设成了自己，
+    如果 activeSub 是「设置后不管」的普通全局变量，inner 跑完把它设成了自己，
     之后 outer 剩余代码的依赖就会全部错误地登记到 inner 名下 —— 数据一变，错的 effect 重跑。
   </p>
 
   <h2>10.2 解法：暂存-还原（隐式借用了函数调用栈）</h2>
   <p>回看第 2 章 run() 的代码，答案早已埋下：</p>
-  <pre class="code" data-title="effect.ts 的 run()（聚焦嵌套处理）"><code>run() {
-  let lastEffect = activeEffect;   // ① 暂存「上一层」是谁（压栈）
+  <pre class="code" data-title="官方 3.5 effect.ts 的 run()（聚焦嵌套处理）"><code>run(): T {
+  ...
+  const prevEffect = activeSub;    // ① 暂存「上一层」是谁（压栈）
+  const prevShouldTrack = shouldTrack;
+  activeSub = this;                // ② 指针换成自己
+  shouldTrack = true;
   try {
-    activeEffect = this;           // ② 指针换成自己
-    ...
     return this.fn();              // ③ 执行（里面可能再嵌套下一层）
   } finally {
-    ...
-    activeEffect = lastEffect;     // ④ 还原（弹栈）
+    cleanupDeps(this);             //    ...
+    activeSub = prevEffect;        // ④ 还原（弹栈）
+    shouldTrack = prevShouldTrack;
   }
 }</code></pre>
   <p>
-    <b>①④ 配合就是一次手动压栈/弹栈</b> —— 只是借用了 JS 函数调用栈本身的递归结构来保存 lastEffect，
+    <b>①④ 配合就是一次手动压栈/弹栈</b> —— 只是借用了 JS 函数调用栈本身的递归结构来保存 prevEffect，
     不需要真的维护一个数组。嵌套多深都没关系：每层 run 都会保存/恢复自己的「上一层」。
   </p>
   <div class="callout deep">
     <span class="tag">🧠 源码演进八卦</span><br>
     Vue 3.0 ~ 3.3 时代，源码里真的有一个 <code class="inline">effectStack</code> 数组（push/pop）；
     到 3.4 重构时发现「暂存局部变量 + finally 还原」完全等价且更少一次数组操作，就换成了现在这种写法 ——
-    本项目采用的正是 3.4 版。读源码时见到两种写法不要慌，它们是同一思想的不同年代版本。
+    教学简化版采用的正是 3.4 版。读源码时见到两种写法不要慌，它们是同一思想的不同年代版本。
   </div>
 
   <h2>10.3 🧪 实验：亲眼看到指针的切换</h2>
   <div class="demo">
-    <div class="demo-head"><span class="dot"></span>🧪 嵌套 effect 演示<span class="hint">观察 activeEffect 指针流转</span></div>
+    <div class="demo-head"><span class="dot"></span>🧪 嵌套 effect 演示<span class="hint">观察 activeSub 指针流转</span></div>
     <div class="demo-body">
       <div class="step-btns" id="nestedSteps">
         <button class="step-btn" data-nested="1">① 运行嵌套 effect</button>
@@ -749,7 +871,7 @@ watchHandle.stop   = watchHandle;</code></pre>
       </div>
       <div class="console" id="nestedConsole"></div>
       <p style="font-size:14px;color:var(--dim);margin-bottom:0">
-        注意 ②：inner 的重跑发生在 outer 运行结束之后，activeEffect 是 null ——
+        注意 ②：inner 的重跑发生在 outer 运行结束之后，activeSub 是 null ——
         所以 inner 自己的依赖照常收集，绝不会串到 outer 头上。
       </p>
     </div>
@@ -759,37 +881,65 @@ watchHandle.stop   = watchHandle;</code></pre>
   <p>
     一个组件会创建大量 effect：渲染 effect、N 个 watch、M 个 computed。
     组件卸载时要一个个 stop 吗？太蠢了。Vue 3.2 引入 <b>effectScope</b>：
-    <b>「作用域内的 effect 我统一记账，一声令下集体退休」</b>。
+    <b>「作用域内的 effect 我统一记账，一声令下集体退休」</b>。官方实现（3.5）：
   </p>
-  <pre class="code" data-title="教学版 effectScope（官方思想的极简实现）"><code>let activeScope = null;                 // 又见「全局指针 + 暂存还原」！
+  <pre class="code" data-title="官方 3.5 effectScope.ts（节选）"><code>export let activeEffectScope: EffectScope | undefined   // ⭐ 全局指针（activeSub 的兄弟）
 
 export class EffectScope {
-  effects = [];                         // 记账本：本作用域内创建的所有 effect
-  cleanups = [];                        // onCleanup 钩子们
-  active = true;
+  private _active = true
+  effects: ReactiveEffect[] = []        // 记账本：本作用域内创建的所有 effect
+  cleanups: (() =&gt; void)[] = []         // onScopeDispose 注册的钩子
+  parent: EffectScope | undefined       // 只有关心的父 scope 才有
+  scopes: EffectScope[] | undefined     // 收编的子 scope
+  private index: number | undefined     // 在父 scopes 里的位置（O(1) 摘除用）
 
-  run(fn) {
-    const lastScope = activeScope;      // 和 effect.run 一模一样的套路！
-    activeScope = this;
-    try {
-      return fn();                     // 期间创建的 effect 会自动来找团长登记
-    } finally {
-      activeScope = lastScope;
+  constructor(public detached = false) {
+    if (!detached &amp;&amp; activeEffectScope) {
+      if (activeEffectScope.active) {
+        this.parent = activeEffectScope
+        this.index = (activeEffectScope.scopes || (activeEffectScope.scopes = [])).push(this) - 1
+      } else {
+        this._active = false            // 父作用域已停：孩子出生即退休，不许变「孤儿作用域」
+      }
     }
   }
 
-  on(fn) { this.cleanups.push(fn); }
+  run&lt;T&gt;(fn: () =&gt; T): T | undefined {
+    if (this._active) {
+      const currentEffectScope = activeEffectScope   // 又见「暂存-还原」！第 5 次了
+      try {
+        activeEffectScope = this
+        return fn()                     // 期间创建的 effect 会自动来团长这里登记
+      } finally {
+        activeEffectScope = currentEffectScope
+      }
+    } else if (__DEV__) {
+      warn(`cannot run an inactive effect scope.`)
+    }
+  }
 
-  stop() {
-    this.active = false;
-    this.effects.forEach(e => e.stop());   // 集体退休
-    this.cleanups.forEach(fn => fn());
-    this.effects.length = 0;
+  stop(fromParent?: boolean): void {
+    if (this._active) {
+      this._active = false
+      for (const e of this.effects) e.stop()       // 团长点名：全连解散
+      this.effects.length = 0
+      for (const fn of this.cleanups) fn()         // onScopeDispose 的钩子逐个执行
+      this.cleanups.length = 0
+      for (const s of this.scopes ?? []) s.stop(true)   // 子团也解散（递归）
+      if (!this.detached &amp;&amp; this.parent &amp;&amp; !fromParent) {
+        const last = this.parent.scopes!.pop()     // ⭐ 从父名册 O(1) 摘除自己：
+        if (last &amp;&amp; last !== this) {               //   队尾顶替 + index 回填，不用 splice
+          this.parent.scopes![this.index!] = last
+          last.index = this.index!
+        }
+      }
+      this.parent = undefined
+    }
   }
 }
 
-// ReactiveEffect 构造时（源码真实逻辑）：
-//   if (activeScope && activeScope.active) activeScope.effects.push(this)
+// ReactiveEffect 构造时（第 2 章你已见过）：
+//   if (activeEffectScope.active) activeEffectScope.effects.push(this)
 //   ↑ 这就是「自动记账」：effect 出生时看一眼当前团长是谁</code></pre>
   <p>使用方式（也是 Composition API 中 stop 的底层原理）：</p>
   <pre class="code" data-title="用法"><code>const scope = effectScope();
@@ -810,42 +960,35 @@ scope.stop();                           // 💥 上面三个全部停止，一�
   </div>
 
   
-  <h2>10.5 官方 effectScope 的实现：又是那个熟悉的指针</h2>
-  <p>本仓库教学版用「团长点名」讲清了原理。官方 <code class="inline">effectScope.ts</code> 的实现完整度更高，
-  但骨架完全一致 —— 第四次见到「全局指针 + 暂存还原」（3.5 还给 EffectScope 加了
-  <code class="inline">pause() / resume()</code>，与 9.9 节 watch 的暂停是同一套 PAUSED 旗标机制）：</p>
-  <pre class="code" data-title="官方 effectScope.ts（精简）"><code>let activeEffectScope;                     // ⭐ 全局指针（activeEffect 的兄弟）
+  <h2>10.5 官方细节：on()/off()、pause/resume 与 detached</h2>
+  <p>10.4 已经是官方主干了，这里补三个只有翻源码才能看到的细节。</p>
+  <pre class="code" data-title="官方 effectScope.ts（补充）"><code>// ① on()/off()：手动「进入作用域」—— 为 async setup 的恢复场景设计
+private _on = 0                       // 计数器：支持嵌套 on 多次
+prevScope: EffectScope | undefined
 
-export class EffectScope {
-  effects = [];        // 收编的直接 effect
-  scopes = [];         // 收编的子 scope（嵌套）
-  parent = null;
-  detached = false;    // ⭐ 脱离父 scope：组件卸载不连坐
-
-  constructor(detached = false) {
-    this.detached = detached;
-    this.parent = activeEffectScope;
-    if (!detached &amp;&amp; this.parent) {
-      this.parent.scopes.push(this);     // 挂到父 scope 名下
-    }
-  }
-  run(fn) {
-    const lastScope = activeEffectScope;   // 暂存（第 10 章 run 的同款配方）
-    try {
-      activeEffectScope = this;
-      return fn();                         // 期间创建的 effect 自动收编：
-    } finally {                            //   ReactiveEffect 构造时会检查 activeEffectScope
-      activeEffectScope = lastScope;       //   并把自己 push 进 scope.effects
-    }
-  }
-  stop() {
-    for (const e of this.effects) e.stop();       // 团长点名：全连解散
-    for (const s of this.scopes) s.stop();        // 子团也解散（递归）
+on(): void {
+  if (++this._on === 1) {
+    this.prevScope = activeEffectScope
+    activeEffectScope = this          // 又见「全局指针切换」，第 6 次
   }
 }
-// 组件卸载时的自动清理（renderComponentRoot）：
-// instance.scope = new EffectScope() → 卸载时 instance.scope.stop()
-// 这就是「组件销毁，里面所有 watch/computed 自动停止」的机关</code></pre>
+off(): void {
+  if (this._on > 0 &amp;&amp; --this._on === 0) {
+    // 快路径：正常 LIFO 直接还原；乱序时沿链摘除（withAsyncContext 的交错恢复）
+    if (activeEffectScope === this) activeEffectScope = this.prevScope
+    ...
+    this.prevScope = undefined
+  }
+}
+
+// ② pause()/resume()：3.5 新增 —— 与 watch 的暂停同一套 PAUSED 旗标（9.9 节）
+pause(): void { ... this.effects[i].pause() ... }   // 递归暂停子 scope
+resume(): void { ... }                              // 恢复时把欠下的触发一次补齐</code></pre>
+  <p>
+    组件卸载时的自动清理：<code class="inline">instance.scope = effectScope()</code> →
+    卸载时 <code class="inline">scope.stop()</code> ——
+    这就是「组件销毁，里面所有 watch/computed 自动停止」的机关。
+  </p>
   <div class="callout deep">
     <span class="tag">🧠 detached 是给谁用的？</span><br>
     <code class="inline">effectScope(true)</code> 创建「脱离体」：里面注册的 effect 不随组件卸载而停止。
@@ -912,7 +1055,7 @@ export function onScopeDispose(fn) {
     它解决的是 9.7 留下的问题：effectScope 能自动停 watch/computed，
     但 <b>setInterval、addEventListener、WebSocket 这些非 effect 资源它够不着</b> ——
     onScopeDispose 给了它们一个随作用域销毁的钩子。
-    本项目没实现这个 API，动手补齐只需要：scope 里加一个 <code class="inline">cleanups: []</code>，
+    教学简化版没实现这个 API，动手补齐只需要：scope 里加一个 <code class="inline">cleanups: []</code>，
     stop 时 <code class="inline">cleanups.forEach(fn =&gt; fn())</code> —— 十行以内的事，适合作为练手。
   </p>
 
@@ -956,11 +1099,11 @@ const { user } = useUser(() =&gt; props.id);</code></pre>
 <details class="quiz">
     <summary>自测一下：嵌套与作用域</summary>
     <div class="quiz-body">
-      <p>1. 如果去掉 finally 里的 <code class="inline">activeEffect = lastEffect</code>，嵌套场景会发生什么？<br>
+      <p>1. 如果去掉 finally 里的 <code class="inline">activeSub = prevEffect</code>，嵌套场景会发生什么？<br>
          2. scope.stop() 之后，scope.run() 里创建的 computed 还能读吗？</p>
       <div class="ans">
         <b>答案：</b><br>
-        1. 内层 effect 跑完后 activeEffect 永远指向内层，外层剩余代码的依赖全登记到内层名下：改外层数据 → 内层重跑（错），改内层数据 → 也内层重跑，外层从此失去响应。<br>
+        1. 内层 effect 跑完后 activeSub 永远指向内层，外层剩余代码的依赖全登记到内层名下：改外层数据 → 内层重跑（错），改内层数据 → 也内层重跑，外层从此失去响应。<br>
         2. 能读（run() 里 <code class="inline">if (!this.active) return this.fn()</code>，非激活态照常执行），但不再收集依赖、不再缓存 —— computed 退化成普通函数调用。
       </div>
     </div>
@@ -995,12 +1138,12 @@ const { user } = useUser(() =&gt; props.id);</code></pre>
     <tr><td><code class="inline">customRef</code></td><td>手动挡 ref</td><td>track/trigger 的调用权交给你</td></tr>
     <tr><td><code class="inline">toRaw</code></td><td>脱掉代理找原对象</td><td>WeakMap 反查</td></tr>
     <tr><td><code class="inline">markRaw</code></td><td>给对象纹身「别代理我」</td><td>跳过代理标记</td></tr>
-    <tr><td><code class="inline">triggerRef</code></td><td>强制 shallowRef 通知</td><td>手动 triggerRefValue</td></tr>
+    <tr><td><code class="inline">triggerRef</code></td><td>强制 shallowRef 通知</td><td>手动 <code class="inline">dep.trigger()</code>（version++ → notify）</td></tr>
   </table>
 
   <h2>11.2 官方是怎么用一个函数工厂生产四兄弟的</h2>
   <p>
-    本项目的 reactive 写死了 mutableHandlers。官方源码用「处理器组合 + 工厂」批量生产 ——
+    教学简化版的 reactive 写死了 mutableHandlers。官方源码用「处理器组合 + 工厂」批量生产 ——
     这是值得学习的代码组织方式：
   </p>
   <pre class="code" data-title="官方思想的教学复刻"><code>// 四种 baseHandler 的差异只体现在两个维度：是否递归（get），是否可写（set）
@@ -1370,7 +1513,7 @@ set.has(reactive(raw));   // false ❌ 代理 !== 原对象，Set 按 === 判等
     <tr><td>①</td><td><code class="inline">console.log(isReactive(data), isRef(data))</code></td><td>对象是不是被 <code class="inline">JSON.parse(JSON.stringify())</code>、接口返回值替换过？换过的就不是代理了（第 3 章）</td></tr>
     <tr><td>②</td><td>检查有没有解构 / 展开 props 或 state</td><td>解构脱壳 → toRefs 救场（7.2）</td></tr>
     <tr><td>③</td><td>检查修改方式：数组下标、length、Set/Map</td><td>官方有 instrumentations 兜底；mini 版没实现（第 5.5 节）</td></tr>
-    <tr><td>④</td><td>检查读取位置：是不是在 effect 外 / setTimeout 宏任务里读的</td><td>activeEffect 无主 → track 白读（4.5 第 ⑤ 步）</td></tr>
+    <tr><td>④</td><td>检查读取位置：是不是在 effect 外 / setTimeout 宏任务里读的</td><td>activeSub 无主 → track 白读（4.5 第 ⑤ 步）</td></tr>
     <tr><td>⑤</td><td>vue-devtools 打开组件 → Dependencies 面板</td><td>依赖列表里没有它 = track 没发生，回到 ①~④；有它但没更新 = trigger 没发生，检查修改路径</td></tr>
   </table>
   <div class="callout tip">

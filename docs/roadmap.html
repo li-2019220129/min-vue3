@@ -178,11 +178,13 @@
     </div>
   </div>
 
-  <h2>51.3 彩蛋：本站发现的三处源码彩蛋</h2>
+  <h2>51.3 彩蛋档案：旧教学实现里的三处「机关」</h2>
+  <p>仓库里的 mini-vue3 是教学简化版，埋了三处「机关」当动手作业 —— 官方 v3.5.43 都没有这些问题，
+  对照着修，顺便体会官方为什么那样写：</p>
   <ul>
-    <li><b>拼写彩蛋</b>：<code class="inline">tarckEffect</code>（track 的手滑版）—— 读源码别迷信，作者也是人。</li>
-    <li><b>作业彩蛋</b>：RefImpl 的 set 里少了一次 <code class="inline">toReactive(newValue)</code>（第 7 章），修掉它，你就给这个项目提了第一个 PR 级别的改动。</li>
-    <li><b>侦探彩蛋</b>：traverse 里 <code class="inline">if (isObject(source)) return source</code> 会让对象从不被深度遍历（第 50 章 Q24 揭晓）—— 对照官方源码，看看你能不能先于面试官发现它。</li>
+    <li><b>拼写彩蛋</b>：<code class="inline">tarckEffect</code>（track 的手滑版）—— 读代码别迷信，作者也是人（官方拼写正确）。</li>
+    <li><b>作业彩蛋</b>：旧版 RefImpl 的 set 里少了一次 <code class="inline">toReactive(newValue)</code>（第 7.5 节）—— 官方的防御写法就是这行，补上它你就理解了「替换值后保持响应」的完整链路。</li>
+    <li><b>侦探彩蛋</b>：旧版 traverse 里 <code class="inline">if (isObject(source)) return source</code> 会让对象从不被深度遍历（第 50 章 Q24 揭晓）—— 对照官方 traverse（9.2 节），看看你能不能先于面试官发现它。</li>
   </ul>
 
   <h2>51.4 下一站：Vue 3.6 正在路上</h2>

@@ -256,7 +256,7 @@ const Row = {
   <details class="quiz">
     <summary>Q5. computed 和 watch 的区别与取舍？</summary>
     <div class="quiz-body"><div class="ans">
-      <b>要点：</b>computed = 派生值（返回值、有缓存、不能异步，第 8 章脏标记）；watch = 副作用（不返回值、能异步、有 onCleanup 处理竞态，第 9 章）。同源：都是 ReactiveEffect + 自定义 scheduler（第 5 章的表格）。
+      <b>要点：</b>computed = 派生值（返回值、有缓存、不能异步，第 8 章脏标记）；watch = 副作用（不返回值、能异步、有 onCleanup 处理竞态，第 9 章）。同源：一套 Subscriber/Dep 机制 + 各自的调度策略（computed 是「双面订阅者」，第 5、8 章）。
     </div></div>
   </details>
   <details class="quiz">
@@ -320,13 +320,13 @@ const Row = {
   <details class="quiz">
     <summary>Q15. 手写：实现一个完整的 mini reactive（含 track/trigger/清理）。</summary>
     <div class="quiz-body"><div class="ans">
-      <b>要点：</b>就是第 3~6 章的全部。注意 3 个易错点：① Reflect.get 第三参 receiver（Q7）；② try/finally 还原 activeEffect（第 2 章）；③ trackId + depsLength 的增量清理（第 6 章）。本站实验室引擎就是标准答案。
+      <b>要点：</b>就是第 3~6 章的全部。注意 3 个易错点：① Reflect.get 第三参 receiver（Q7）；② try/finally 还原 activeSub（第 2 章）；③ version 快照 + 「先挂起后清算」的增量清理（第 6 章）。官方 Link/Dep 版是标准答案，本站实验室引擎是它的教学简化模型。
     </div></div>
   </details>
   <details class="quiz">
     <summary>Q16. 手写：带缓存的 computed，要求支持链式依赖。</summary>
     <div class="quiz-body"><div class="ans">
-      <b>要点：</b>ComputedRefImpl 三件套（第 8 章）：内部 ReactiveEffect（run 时标净）、自定义 scheduler（只标脏+通知下游，不重算）、get value 里的 trackRefValue（让自己可被依赖）。链式传播 = 脏标记多米诺。
+      <b>要点：</b>ComputedRefImpl 三件套（第 8 章）：自己实现 Subscriber（3.5 起不再包 effect）、notify 只标脏并传播（绝不重算）、get value 里 dep.track() + refreshComputed（让自己可被依赖、读取时才结账）。链式传播 = 版本号记账的多米诺。
     </div></div>
   </details>
   <details class="quiz">
@@ -373,11 +373,13 @@ const Row = {
     </div></div>
   </details>
   <details class="quiz">
-    <summary>Q24. 开放题：如果让你给这个 mini-vue3 提 PR，你会修什么？（送分题，考察你是否真读了源码）</summary>
+    <summary>Q24. 开放题：给一个简化版响应式实现挑毛病，你能找出几处？（考察你是否真读了源码）</summary>
     <div class="quiz-body"><div class="ans">
-      <b>要点（本站发现的两处 + 延伸）：</b>① RefImpl.set 里补 <code class="inline">this._value = toReactive(newValue)</code>（第 7 章彩蛋）；
-      ② set 拦截的 <code class="inline">!==</code> 换 <code class="inline">!Object.is</code> 防 NaN 重复触发（第 5 章）；
-      ③ traverse 里 <code class="inline">if (isObject(source)) return source</code> 疑似把对象提前返回了（应先 seen.add 再判断，可对照官方源码）—— 你发现了吗？
+      <b>要点（对照官方 v3.5.43 的三处差异）：</b>① RefImpl.set 缺 <code class="inline">this._value = toReactive(newValue)</code>
+      —— 替换对象值后深层失去响应（官方写法见第 7.5 节）；
+      ② set 拦截用 <code class="inline">!==</code> 应换 <code class="inline">!Object.is</code> 防 NaN 重复触发（官方 hasChanged，第 5.2 节）；
+      ③ traverse 里 <code class="inline">if (isObject(source)) return source</code> 把对象提前返回了（官方先记 seen 再递归，第 9.2 节）。
+      能说出「官方对应实现是怎么防的」= 满分。
     </div></div>
   </details>
 

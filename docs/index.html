@@ -39,9 +39,9 @@
     <h1>像读小说一样<br>读懂 Vue3 的心脏</h1>
     <p class="sub">
       这不是又一份 API 文档。这里没有黑盒 —— 51 章内容、15 个交互实验室，
-      你将逐行阅读一个真实可运行的 <b>mini-vue3</b>，
+      以 <b>官方 v3.5.43 源码</b>为主线逐行精读，
       从 <code class="inline">count.value++</code> 一路读到最长递增子序列，
-      最后亲手写出一个能跑的迷你渲染器。
+      再用配套的 mini-vue3 仓库亲手把学到的架构写一遍。
     </p>
     <div class="hero-ctas">
       <a class="btn-primary" href="#overview">开始学习 →</a>
@@ -53,7 +53,7 @@
     <div class="feature">
       <div class="ico">🔬</div>
       <h3>逐行精读真实源码</h3>
-      <p>网站里的每一行代码都来自这个 monorepo 的 <code class="inline">packages/</code> 目录，不是伪代码。渲染器与组件化部分提供可直接抄进项目跑起来的教学实现。</p>
+      <p>响应式核心章节直接走读 <b>vuejs/core v3.5.43</b> 的真实源码（Link/Dep/版本计数），不是伪代码；渲染器与组件化部分提供可直接抄进项目跑起来的教学实现。</p>
     </div>
     <div class="feature">
       <div class="ico">🧪</div>
@@ -135,10 +135,12 @@
   </p>
   <div class="callout tip">
     <span class="tag">📌 版本基准</span><br>
-    本站讲解以 <code class="inline">mini-vue3</code>（本仓库的教学实现）为主线，
-    并同步对照<b>官方最新稳定版源码</b>（写作时为 <code class="inline">v3.5.43</code>，2026-09 发布）。
-    官方实现与教学实现的差异，各章会明确标注；官方最新的演进（双向链表 + 版本计数）见第 6、14 章，
-    下一代的 3.6（Vapor 模式 + alien-signals 重写）见第 51 章结业彩蛋。
+    本站以<b>官方最新稳定版源码为主线</b>：响应式各章直接精读
+    <code class="inline">vuejs/core v3.5.43</code>（写作时最新，2026-09 发布）的
+    effect / dep / reactive / ref / computed / watch 真实实现。
+    仓库里的 <code class="inline">mini-vue3</code> 是配套的<b>动手施工材料</b>（教学简化版），
+    用于实验室演示与「把 mini-vue3 写完」系列（第 44~48 章）；它与官方的差异，各章会明确标注。
+    下一代的 3.6（Vapor 模式 + alien-signals 重写）见第 51 章结业展望。
   </div>
 
   <h2>1.1 一个 monorepo 的自我修养</h2>
@@ -192,26 +194,28 @@ export function isFunction(value) {
   </p>
 
   <h2>1.3 reactivity：主角登场前的预告片</h2>
-  <p>reactivity 包的 <code class="inline">src</code> 目录有 8 个文件，它们的关系是这样的：</p>
+  <p>官方 reactivity 包（v3.5.43）的 <code class="inline">src</code> 目录约 15 个文件，核心的几个关系是这样：</p>
   <div class="diagram">
     <div class="flow">
       <span class="fbox">reactive.ts<br><small>造代理</small></span>
       <span class="farrow">→</span>
-      <span class="fbox">baseHandler.ts<br><small>get/set 拦截</small></span>
+      <span class="fbox">baseHandlers.ts<br><small>get/set 拦截</small></span>
       <span class="farrow">→</span>
-      <span class="fbox blue">reactiveEffect.ts<br><small>track / trigger</small></span>
+      <span class="fbox blue">dep.ts<br><small>Dep / Link / track / trigger</small></span>
       <span class="farrow">→</span>
-      <span class="fbox rose">effect.ts<br><small>ReactiveEffect</small></span>
+      <span class="fbox rose">effect.ts<br><small>ReactiveEffect / activeSub / batch</small></span>
     </div>
     <div class="flow" style="margin-top:12px">
       <span class="fbox gray">ref.ts</span>
       <span class="farrow">↔</span>
       <span class="fbox gray">computed.ts</span>
       <span class="farrow">↔</span>
-      <span class="fbox gray">apiWatch.ts</span>
-      <span style="font-size:13px;color:var(--dim)">—— 三个上层 API，全都站在 ReactiveEffect 的肩膀上</span>
+      <span class="fbox gray">watch.ts</span>
+      <span class="farrow">↔</span>
+      <span class="fbox gray">effectScope.ts</span>
+      <span style="font-size:13px;color:var(--dim)">—— 四个上层 API，全都站在 Dep/Link 的肩膀上</span>
     </div>
-    <div class="cap">后面 8 章会按这个依赖顺序逐个击破，你现在只需要混个眼熟</div>
+    <div class="cap">后面几章会按这个依赖顺序逐个击破，你现在只需要混个眼熟</div>
   </div>
 
   <h2>1.4 怎么跑起来 &amp; 怎么调试</h2>
@@ -233,8 +237,8 @@ node scripts/dev.js runtime-dom -f esm</code></pre>
   </div>
 
   
-  <h2>1.5 文件地图：17 个源码文件，先混个脸熟</h2>
-  <p>把 <code class="inline">packages/</code> 里的每个文件列出来（行数是真实数字），读完本章你应该能指着每个文件说出它是干嘛的：</p>
+  <h2>1.5 文件地图：动手仓库的 17 个源码文件</h2>
+  <p>主线读官方（下一节给官方目录地图），动手写 mini。把仓库 <code class="inline">packages/</code> 里的每个文件列出来（行数是真实数字），读完本章你应该能指着每个文件说出它是干嘛的：</p>
   <table>
     <tr><th>文件</th><th>行数</th><th>一句话职责</th><th>本站章节</th></tr>
     <tr><td><code class="inline">shared/src/index.ts</code></td><td>6</td><td>isObject / isFunction</td><td>第 1 章</td></tr>

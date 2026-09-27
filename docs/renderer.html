@@ -1278,7 +1278,7 @@ function setupRenderEffect(instance, container, anchor) {
     onMounted 等钩子的原理朴素得可爱：<b>往当前组件实例的钩子数组里 push 回调</b>，时机到了挨个调用。
     关键又是那个熟悉的全局指针模式：
   </p>
-  <pre class="code" data-title="生命周期原理（教学版）"><code>let currentInstance = null;          // 第三次见到这个模式了！（activeEffect、activeScope）
+  <pre class="code" data-title="生命周期原理（教学版）"><code>let currentInstance = null;          // 第三次见到这个模式了！（activeSub、activeEffectScope）
 
 function onMounted(fn) {
   if (currentInstance) {             // 必须在 setup 同步执行期间调用！

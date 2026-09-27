@@ -547,7 +547,7 @@ function $subscribe(callback, opts) {
 });</code></pre>
   <div class="callout deep">
     <span class="tag">🧠 「断言行为，不断言实现」</span><br>
-    官方测试从不检查内部变量 _trackId / dep 结构，只断言外部可观察行为：调用几次、值是多少、DOM 变没变。
+    官方测试从不检查内部变量（dep / Link / version 结构），只断言外部可观察行为：调用几次、值是多少、DOM 变没变。
     所以 Vue 才能在 3.4 敢把整个依赖系统从 Map 换成链表、3.6 又敢换成 alien-signals —— 测试照绿。
     <b>好的测试是重构的通行证。</b>
   </div>
