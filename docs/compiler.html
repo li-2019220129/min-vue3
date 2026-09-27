@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 编译器篇</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 30 compiler ============ -->
+<section class="page" id="page-compiler">
+  <div class="kicker">第 30 章 · 编译器篇</div>
+  <h1>编译器：模板到 render 函数</h1>
+  <p class="lead">
+    你写的 <code class="inline">&lt;template&gt;</code> 不是浏览器能懂的东西 ——
+    它在构建阶段被编译成 h() 调用。本章不实现编译器（那是一座独立的山），
+    但要看懂它的<b>产物</b>和<b>三大优化</b> —— 这决定了你写模板时的性能直觉。
+  </p>
+
+  <h2>30.1 三段流水线：parse → transform → generate</h2>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox">template 字符串</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">parse<br><small>→ AST 语法树</small></span>
+      <span class="farrow">→</span>
+      <span class="fbox rose">transform<br><small>→ 优化 + 打标</small></span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">generate<br><small>→ render 函数代码</small></span>
+    </div>
+    <div class="cap">和任何编译器（Babel、TypeScript、GCC）同构：词法/语法分析 → 转换 → 代码生成</div>
+  </div>
+
+  <h2>30.2 一段模板的「前后对照」</h2>
+  <pre class="code" data-title="输入：模板"><code>&lt;template&gt;
+  &lt;div class="box"&gt;
+    &lt;h1&gt;标题不变&lt;/h1&gt;
+    &lt;p&gt;{{ count }}&lt;/p&gt;
+  &lt;/div&gt;
+&lt;/template&gt;</code></pre>
+  <pre class="code" data-title="输出：编译后的 render 函数（真实产物的可读化）"><code>// ① 静态节点被「提升」到函数外 —— 只创建一次，每次渲染直接复用（hoistStatic）
+const _hoisted_1 = h("h1", null, "标题不变");
+
+function render(_ctx) {
+  return h("div", { class: "box" }, [
+    _hoisted_1,                              // 直接引用，不重新创建 vnode
+    h("p", null, _ctx.count, -1 /* PROPS 无, TEXT 有 */),
+    //                                    ↑ patchFlag：告诉 patch「这个节点只有文本会变」
+  ]);
+}</code></pre>
+
+  <h2>30.3 优化一：静态提升（hoistStatic）</h2>
+  <p>
+    模板里大量内容是静态的（标题、图标、装饰节点）。不提升的话，每次渲染都为它们重建 vnode —— 纯浪费。
+    提升到 render 函数外后：<b>创建一次，终身复用</b>。配合第 17 章 patch 里
+    <code class="inline">oldVNode === vnode</code> 的短路判断 —— 连 diff 都不用做，同一引用直接跳过。
+  </p>
+  <div class="callout tip">
+    <span class="tag">💡 写模板的黄金直觉</span><br>
+    模板里「写死的内容」几乎零成本（提升 + 短路）。真正的开销在<b>动态绑定的数量</b> ——
+    一个 <code class="inline">{{ }}</code> 就是一个动态点。把静态内容从 v-for 里挪出来，比任何手动优化都实在。
+  </div>
+
+  <h2>30.4 优化二：patchFlag —— 靶向更新</h2>
+  <p>
+    第 18 章的 patchElement 要 diff 完整的 props 对象。但编译器<b>在编译期就知道</b>哪些属性是动态的：
+  </p>
+  <pre class="code" data-title="patchFlag 的威力"><code>// 模板：&lt;div :class="cls" :id="id"&gt;文本不变&lt;/div&gt;
+// 编译产物（示意）：
+h("div", { class: _ctx.cls, id: _ctx.id }, "文本不变",
+  3 /* CLASS | ID */);      // ← 只有 class 和 id 是动态的！
+
+// patch 时：
+if (patchFlag &amp; PatchFlags.CLASS)  只更新 class
+if (patchFlag &amp; PatchFlags.ID)    只更新 id
+// 其余属性：看都不看 —— diff 一个对象的成本变成了 diff 两个布尔位</code></pre>
+  <p>
+    这就是 Vue3 官方 benchmark 比 Vue2 快的原因之一：<b>运行时把编译期攒的情报花掉</b>。
+    React 没有编译层（JSX 太自由），只能全量 diff —— 这是两种框架哲学的分水岭。
+  </p>
+
+  <h2>30.5 优化三：Block Tree / dynamicChildren</h2>
+  <p>
+    有了 patchFlag 再往前一步：patch 为什么还要<b>递归整棵树</b>？
+    编译期把所有「动态节点」收集到一个扁平数组（dynamicChildren）里，
+    更新时<b>只遍历这个数组</b> —— 静态的整棵子树被完全绕过：
+  </p>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">div（静态）</span>
+        <span class="farrow">├─</span>
+        <span class="fbox gray">ul（静态）</span>
+        <span class="farrow">│&nbsp;&nbsp;└─</span>
+        <span class="fbox blue">li {{item}} ⭐</span>
+      </div>
+      <div class="flow">
+        <span style="font-size:15.5px;color:var(--dim)">传统 patch：递归访问每个节点（含静态）</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">Block: [li⭐]</span>
+        <span class="farrow">→</span>
+        <span style="font-size:15.5px;color:var(--dim)">Block 模式：只有 1 个动态节点，只 patch 它</span>
+      </div>
+    </div>
+  </div>
+  <p>为什么叫 Block？模板里出现结构性指令（v-if/v-for）时会「开新块」，块的边界处理结构变化 —— 细节较多，记住结论即可：</p>
+  <blockquote>编译器把「哪里会变」提前告诉了运行时，运行时因此能跳过一切不会变的地方。Vue3 性能的三大支柱：静态提升、patchFlag、Block Tree。</blockquote>
+
+  <h2>30.6 cacheHandlers：事件也提升</h2>
+  <pre class="code" data-title="内联事件的处理"><code>// 模板：&lt;button @click="count++"&gt;
+// 编译产物（开启 cacheHandlers 后）：
+const _cache = [];
+function render(_ctx) {
+  return h("button", {
+    onClick: _cache[0] || (_cache[0] = ($event) => (_ctx.count++)),
+  }, "点我");
+}
+// 没缓存：每次渲染生成新函数 → props diff 认为变了 → 触发 patchProp
+// 有缓存：同一函数引用 → diff 短路 → 配合第 15 章 invoker，事件彻底零开销</code></pre>
+  <p>看到没 —— 第 15 章的 invoker + 第 18 章的 props diff + 编译器的 cacheHandlers，三章的知识在这里拧成了一股绳。</p>
+
+  
+  <h2>30.7 模板表达式的沙箱：为什么模板里写不了 window</h2>
+  <p>你在模板里写 <code class="inline">{{ Math.max(1, 2) }}</code> 可以，写
+    <code class="inline">{{ window.alert(1) }}</code> 不行 —— 这不是浏览器限制，是编译器+运行时共同修的围栏：</p>
+  <pre class="code" data-title="白名单机制（compiler 的 isGloballyAllowed）"><code>// 编译期：prefixIdentifiers 处理模板里的每个标识符
+const GLOBALS_ALLOWED = 'Infinity,undefined,NaN,isFinite,isNaN,parseFloat,parseInt,' +
+  'decodeURI,decodeURIComponent,encodeURI,encodeURIComponent,' +
+  'Math,Number,Date,Array,Object,Boolean,String,RegExp,Map,Set,JSON,Intl,BigInt,' +
+  'console,Error,Symbol';
+
+// 不在白名单、也不是 _ctx 上有的标识符 → 统一加前缀 _ctx.xxx
+// 模板里写 window.alert → 编译成 _ctx.window.alert
+// → 渲染时 warn: Property "window" was accessed during render but is not defined on instance.</code></pre>
+  <table>
+    <tr><th>你在模板里写</th><th>实际编译成</th><th>结果</th></tr>
+    <tr><td><code class="inline">{{ count }}</code></td><td><code class="inline">_ctx.count</code></td><td>从实例口袋找（第 19.6 节顺序）</td></tr>
+    <tr><td><code class="inline">{{ Math.abs(x) }}</code></td><td><code class="inline">Math.abs(_ctx.x)</code></td><td>白名单放行，用真全局</td></tr>
+    <tr><td><code class="inline">{{ window.alert(x) }}</code></td><td><code class="inline">_ctx.window.alert(...)</code></td><td>警告 + undefined 报错</td></tr>
+    <tr><td><code class="inline">{{ setTimeout(fn) }}</code></td><td><code class="inline">_ctx.setTimeout(fn)</code></td><td>警告（setTimeout 不在白名单）</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么建围栏</span><br>
+    ① <b>安全</b>：模板是「半信任输入」（组件库文档、低代码平台都允许用户写模板），
+    能摸到 window 就能摸到 fetch/location —— 攻击面不可控；
+    ② <b>可静态分析</b>：标识符来源被限定后，编译器才知道哪些是「数据」哪些是「常量」，
+    静态提升、patchFlag 才有依据；③ <b>可移植</b>：不依赖浏览器全局，SSR / 小程序渲染器（第 37 章）
+    才能跑同一份模板。想用 setTimeout？放进 setup 里导出 —— 需求成立时它就该是组件状态的一部分。
+  </div>
+
+  <h2>30.7 SFC 编译：一个 .vue 文件产出三份代码</h2>
+  <p>
+    前面六章讲的都是 <code class="inline">&lt;template&gt;</code> 的编译。完整的单文件组件由
+    <code class="inline">@vue/compiler-sfc</code> 统一处理，产出三份互相咬合的代码：
+  </p>
+  <table>
+    <tr><th>源码块</th><th>编译产物</th><th>关键点</th></tr>
+    <tr><td><code class="inline">&lt;script setup&gt;</code></td><td>普通 <code class="inline">setup()</code> 函数</td><td>顶层变量自动 return（编译期收集，不用手写）；<b>编译宏被原地拆掉</b>（见 34.4）</td></tr>
+    <tr><td><code class="inline">&lt;template&gt;</code></td><td>render 函数</td><td>第 30 章三段流水线；顶层变量通过 <code class="inline">$setup</code> 前缀访问（31.5）</td></tr>
+    <tr><td><code class="inline">&lt;style scoped&gt;</code></td><td>带 <code class="inline">[data-v-xxx]</code> 属性选择器的 CSS</td><td>同时给模板里每个元素插桩 <code class="inline">data-v-xxx</code> attr —— 样式隔离的原理</td></tr>
+  </table>
+  <pre class="code" data-title="scoped 的插桩效果（真实产物）"><code>/* 你写的 */
+p { color: red; }
+
+/* 编译产物 */
+p[data-v-7ba5bd90] { color: red; }
+/* 模板同时被插桩： _createVNode("p", { "data-v-7ba5bd90": "" }, ...) */</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么 scoped 隔离靠属性选择器而不是 Shadow DOM？</span><br>
+    Shadow DOM 隔离太彻底（全局样式、字体、弹窗挂载都会被切断），生态工具链难适配；
+    属性选择器是「够用的隔离」—— 同一文档内，cost 为零。框架选型里的反复权衡，
+    比技术本身更值得学。
+  </div>
+
+
+  <h2>30.8 compile() 的选项全家福：compilerOptions 速查</h2>
+  <p>
+    前面各章零散提过一些编译选项，这里收拢成一张表。vite 里通过
+    <code class="inline">vue({ template: { compilerOptions: {...} } })</code> 传入：
+  </p>
+  <table>
+    <tr><th>选项</th><th>默认</th><th>作用（本站出处）</th></tr>
+    <tr><td><code class="inline">whitespace</code></td><td>'condense'</td><td>空白压缩：换行缩进折叠、纯空白文本节点移除（产物更小的隐形功臣）</td></tr>
+    <tr><td><code class="inline">delimiters</code></td><td>['{{','}}']</td><td>改插值定界符（与后端模板引擎共存时）</td></tr>
+    <tr><td><code class="inline">comments</code></td><td>false</td><td>保留 HTML 注释为 Comment vnode（25 章的 case Comment）</td></tr>
+    <tr><td><code class="inline">isCustomElement</code></td><td>—</td><td>声明 web components 标签，避免被 resolveComponent 误判成组件</td></tr>
+    <tr><td><code class="inline">nodeTransforms / directiveTransforms</code></td><td>[]</td><td>自定义编译期 transform 的公开入口（32.4 实战）</td></tr>
+    <tr><td><code class="inline">hoistStatic / cacheHandlers</code></td><td>true</td><td>静态提升 / 事件缓存的总开关（30 章三大优化）</td></tr>
+    <tr><td><code class="inline">onWarn</code></td><td>console.warn</td><td>模板警告接管 —— 可接进 35 章的错误上报体系</td></tr>
+    <tr><td><code class="inline">scopeId / slotted</code></td><td>—</td><td>scoped style 的 data-v 插桩标识（30.7 的插桩就是它干的）</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 这张表的读法</span><br>
+    每个选项背后都是一个「编译期 vs 运行时」的分工决策：whitespace 是编译期替运行时省字符串成本；
+    isCustomElement 是编译期消除 resolve 的不确定性…… 看懂选项，就看懂设计者在哪划的线。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：编译优化</summary>
+    <div class="quiz-body">
+      <p>1. 为什么 v-if 会导致「开新 Block」，而 v-show 不会？<br>
+         2. <code class="inline">{{ Date.now() }}</code> 每次渲染值都不同，但编译器认为它是静态文本（无依赖）——这有坑吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. v-if 改变<b>结构</b>（节点存在与否），dynamicChildren 的扁平数组无法表达「这块结构可能整个消失」，必须在分支处切块、走传统递归 patch；v-show 只改 style.display，结构恒定，仍可走 Block 快路径。<br>
+         2. 有坑但通常无害：它只在没有响应式依赖时求值一次。真正的问题是「你以为它是实时的」—— 它只在组件重渲染时才更新。正确做法是用 ref + 定时器驱动。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="compiler">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="builtins.html#suspense"><span class="dir">上一章</span><span class="t">← Suspense 深读</span></a>
+    <a class="next" href="#ast"><span class="dir">下一章</span><span class="t">AST 与 tokenizer：模板变成树 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 31 ast ============ -->
+<section class="page" id="page-ast">
+  <div class="kicker">第 31 章 · 编译器篇</div>
+  <h1>AST 与 tokenizer：模板变成树</h1>
+  <p class="lead">
+    第 30 章讲了编译器的三段流水线，从本章开始逐段下钻。<b>parse</b> 是起点：
+    把一串字符变成一棵抽象语法树（AST）。官方实现是一台 500+ 行的
+    <b>tokenizer 状态机</b>（<code class="inline">compiler-core/src/parser.ts</code>）——
+    本章解释它为什么值这个价钱。
+  </p>
+
+  <h2>31.1 AST 长什么样</h2>
+  <p>先看产物。左边是模板，右边是 parse 出的 AST（去掉 loc 位置信息的精简版）：</p>
+  <div class="diagram">
+    <div class="stack-vert" style="align-items:flex-start">
+      <div class="flow">
+        <span class="fbox gray">&lt;div id="app"&gt;</span>
+        <span class="farrow">┃</span>
+        <span class="fbox mono">RootNode</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">  &lt;span&gt;hello {{ name }}&lt;/span&gt;</span>
+        <span class="farrow">┃</span>
+        <span class="fbox mono">└ ElementNode(div, props: [id])</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">  &lt;p v-if="ok"&gt;hi&lt;/p&gt;</span>
+        <span class="farrow">┃</span>
+        <span class="fbox mono">&nbsp;&nbsp;&nbsp;├ ElementNode(span)</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">&lt;/div&gt;</span>
+        <span class="farrow">┃</span>
+        <span class="fbox mono">&nbsp;&nbsp;&nbsp;│&nbsp; └ TextNode("hello ") + InterpolationNode(name)</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray"></span>
+        <span class="farrow">┃</span>
+        <span class="fbox mono">&nbsp;&nbsp;&nbsp;└ ElementNode(p, directives: [vIf(ok)])</span>
+      </div>
+    </div>
+    <div class="cap">每个节点都带 type + children + loc（源码位置）—— loc 是开发时「模板第几列报错」的底气</div>
+  </div>
+  <table>
+    <tr><th>节点类型</th><th>来自</th><th>将来变成</th></tr>
+    <tr><td><code class="inline">ElementNode</code></td><td>真实标签</td><td>h() 调用（createElementVNode）</td></tr>
+    <tr><td><code class="inline">TextNode</code></td><td>纯文本</td><td>字符串参数或 createTextVNode</td></tr>
+    <tr><td><code class="inline">InterpolationNode</code></td><td><code class="inline">{{ name }}</code></td><td><code class="inline">toDisplayString(name)</code></td></tr>
+    <tr><td><code class="inline">CompoundExpressionNode</code></td><td>文本 + 插值混排</td><td><code class="inline">"hello " + toDisplayString(name)</code>（拼接表达式）</td></tr>
+    <tr><td><code class="inline">DirectiveNode</code></td><td>v-if / v-on 等指令</td><td>transform 阶段消化掉（第 32 章）</td></tr>
+  </table>
+
+  <h2>31.2 为什么是状态机，而不是正则一把梭</h2>
+  <p>
+    官方 parser 的核心是一张 <b>25 个状态的状态机</b>（DATA、TagOpen、TagName、BeforeAttrName……）。
+    每读一个字符，按当前状态决定转移：
+  </p>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox gray">DATA</span>
+      <span class="farrow">遇到 &lt;</span>
+      <span class="fbox blue">TagOpen</span>
+      <span class="farrow">遇到字母</span>
+      <span class="fbox blue">TagName</span>
+      <span class="farrow">遇空格 / &gt;</span>
+      <span class="fbox">AttrName / Value</span>
+      <span class="farrow">遇到 &gt;</span>
+      <span class="fbox rose">回到 DATA（递归读 children）</span>
+    </div>
+    <div class="cap">文本、插值 {{ }}、标签、属性……每种语法都是一次状态转移</div>
+  </div>
+  <div class="callout deep">
+    <span class="tag">🧠 状态机的两个「不可替代」</span><br>
+    ① <b>性能</b>：一遍扫描 O(n)，每个字符只处理一次；正则回溯在超大模板上是灾难。
+    ② <b>错误恢复</b>：状态机在任意位置都知道「合法的下一个符号是什么」——
+    所以能报出「<code class="inline">v-else/v-else-if has no adjacent v-if</code>」
+    这类精确错误，甚至容错修复继续解析。Vue 3.4 重写 parser 后，
+    <a href="masters.html#perf">性能提升约一倍、体积减半</a>，就是靠把正则组合换成了纯状态机。
+  </div>
+
+  <h2>31.3 解析上下文：parse 阶段就在为 codegen 埋线</h2>
+  <pre class="code" data-title="ParserContext（compiler-core，精简）"><code>export interface ParserContext {
+  options: MergedParserOptions,   // delimiters、isCustomElement、getNamespace...
+  ns: Namespace,                  // svg / MathML / html —— 命名空间逐层继承
+  helpers: Set&lt;symbol&gt;,           // ⭐ 用到的运行时 helper 在 parse 阶段就开始登记
+  source: string,                 // 剩余未消费的源码（指针 = R + C）
+}
+// 每吐出一个节点都调 createExp：
+// 表达式里的 name / _ctx.name / $setup.name 会被 parse 成不同前缀标记，
+// 供 codegen 的 prefixIdentifiers 决定生成 this.name 还是解构后的 _ctx.name</code></pre>
+
+  <h2>31.4 🧪 编译器游乐场：模板 → AST → 代码 三栏对照</h2>
+  <p>选一个模板，左看它的 AST 结构、右看最终生成的 render 代码 —— 三段流水线的入口和出口一次看全：</p>
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 编译器游乐场<span class="hint">模板 → AST → render 代码</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="cpSteps">
+        <button class="step-btn" data-cp="0">示例① 插值文本</button>
+        <button class="step-btn" data-cp="1">示例② v-if 分支</button>
+        <button class="step-btn" data-cp="2">示例③ 列表 + 事件</button>
+      </div>
+      <div class="demo-grid" style="grid-template-columns:1fr 1.4fr">
+        <div class="demo-col">
+          <h4>📝 模板 &amp; AST（核心字段）</h4>
+          <div class="console" id="cpAst" style="height:300px"></div>
+        </div>
+        <div class="demo-col">
+          <h4>⚙️ 生成的 render 函数</h4>
+          <div class="console" id="cpCode" style="height:300px"></div>
+        </div>
+      </div>
+      <p style="font-size:14px;color:var(--dim);margin-bottom:0" id="cpTip">
+        提示：三个示例分别对应「纯插值」「结构化指令」「列表 diff + 事件绑定」三种典型编译形态。
+      </p>
+    </div>
+  </div>
+
+  
+  <h2>31.5 报错之后继续编译：parser 的错误恢复</h2>
+  <p>解析到一半发现语法错误，直接 throw 是最容易的实现，但体验最差 —— 用户每次只能看到一个错。
+  官方 parser 的选择是<b>收集着继续跑</b>：</p>
+  <pre class="code" data-title="错误恢复三招（compiler-core parser）"><code>// ① 错误不抛出，统一上报
+function onError(code, loc, msg) {
+  options.onError(createCompilerError(code, loc, messages, msg));
+}
+// 每个 ErrorCodes 都带精确的 loc：{ start: { line, column, offset } }
+
+// ② 分支跳过：闭合标签对不上时，跳到下一个合法边界继续扫
+function parseChildren(...) {
+  while (!isEnd(context)) { ... }        // isEnd 检查：父级闭合标签？EOF？
+  // 遇到无法识别的标签 → 当作纯文本降级处理，解析不中断
+}
+
+// ③ 最后统一报告：所有错误一起呈现
+// &lt;div&gt;&lt;span&gt;&lt;/div&gt;&lt;/span&gt;
+//        ↑ 1 个错误：&lt;span&gt; 闭合缺失，且指出它"期望"在哪里闭合</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 容错的价值链</span><br>
+    状态机（31.2 节）+ 错误码 + loc 三件套是配套的：状态机知道「此刻合法的符号集」，
+    所以能给出「期望是什么」级别的提示；loc 让编辑器能画波浪线；
+    容错继续跑让 IDE 能一次给出全部诊断 ——
+    <b>Volar 插件的模板红色波浪线，源头就是这套编译器错误恢复</b>。
+    这也解释了为什么选状态机而不选正则：正则整体失败，拿不到「继续扫」的断点。
+  </div>
+
+  <h2>31.5 表达式的前缀化：parse 阶段就在为 codegen 铺路</h2>
+  <p>
+    模板里的 <code class="inline">count</code>、<code class="inline">user.name</code>，
+    最终要变成「运行时能找到的变量」。它们从哪来？前缀化（prefixIdentifiers）负责定位：
+  </p>
+  <table>
+    <tr><th>模板表达式</th><th>Options API 产物</th><th><code class="inline">&lt;script setup&gt;</code> 产物</th></tr>
+    <tr><td><code class="inline">{{ count }}</code></td><td><code class="inline">_ctx.count</code>（运行时代理查找）</td><td><code class="inline">_unref(count)</code>（直接闭包变量！）</td></tr>
+    <tr><td><code class="inline">{{ msg.toUpperCase() }}</code></td><td><code class="inline">_ctx.msg.toUpperCase()</code></td><td>直接 <code class="inline">msg.toUpperCase()</code></td></tr>
+    <tr><td><code class="inline">{{ items.filter(f) }}</code></td><td><code class="inline">_ctx.items...</code>，方法走 <code class="inline">_ctx.f</code></td><td>闭包直取，方法调用零查找</td></tr>
+  </table>
+  <pre class="code" data-title="parse 阶段的表达式处理（简化）"><code>// createExp 处理插值/指令值时，同时分析其中的标识符：
+//   count     → { content: 'count', isStatic: false, identifiers: ['count'] }
+// 前缀化遍历 identifiers，按来源打前缀：
+//   在 setup 绑定表里 → $setup.count  （script setup 进一步：直接闭包引用）
+//   在 props 声明里   → $props.count
+//   都不在           → _ctx.count    （with 版不前缀，走作用域链，见 33.3）</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 这就是 <code class="inline">&lt;script setup&gt;</code> 更快的根源</span><br>
+    Options API 的模板变量全部经 <code class="inline">_ctx</code>（一个 Proxy，proxyRefs + 查找链），
+    每次读取都付代理转发成本；script setup 的变量在编译期就确定是闭包直取 ——
+    <b>零查找</b>。一个语法糖同时完成「少写代码」和「运行更快」，靠的完全是编译期信息量。
+    （34.4 的编译宏是同一主题的另一半。）
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：AST 与 tokenizer</summary>
+    <div class="quiz-body">
+      <p>1. {{ name }} 在 AST 里是什么节点？它和纯文本混排后呢？<br>
+         2. 为什么说状态机的错误报告能力是正则比不了的？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 单独时是 InterpolationNode；与文本混排时合并为 CompoundExpressionNode，
+        里面按顺序存字符串片段与表达式 —— codegen 时直接生成字符串拼接代码。<br>
+        2. 状态机在任意时刻都处于一个「已知状态」，遇到非法输入能精确说出「在 TagName 状态不该遇到 =」；
+        正则只能整体匹配失败，难以定位到字符级位置，更难做容错恢复。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="ast">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#compiler"><span class="dir">上一章</span><span class="t">← 编译器总览：模板到 render</span></a>
+    <a class="next" href="#transform"><span class="dir">下一章</span><span class="t">transform：指令的变身术 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 32 transform ============ -->
+<section class="page" id="page-transform">
+  <div class="kicker">第 32 章 · 编译器篇</div>
+  <h1>transform 流水线：指令的变身术</h1>
+  <p class="lead">
+    parse 出的 AST 还「太老实」—— v-if 就是挂在元素上的指令记录，codegen 没法直接打印。
+    <b>transform</b> 负责把「指令描述」改写成「可执行的结构」，顺带完成静态提升、patchFlag 打标。
+    官方源码：<code class="inline">compiler-core/src/transform.ts</code> + <code class="inline">transforms/</code> 目录。
+  </p>
+
+  <h2>32.1 洋葱模型：enter 与 exit</h2>
+  <p>
+    transform 对 AST 做一次深度优先遍历，每个节点依次穿过一组 <code class="inline">nodeTransforms</code>。
+    关键在双阶段设计：
+  </p>
+  <pre class="code" data-title="traverseNode：先 enter 后 exit（transform.ts 核心）"><code>function traverseNode(node, context) {
+  context.currentNode = node;
+  const { nodeTransforms } = context;
+  const exitFns = [];
+  for (let i = 0; i &lt; nodeTransforms.length; i++) {
+    const onExit = nodeTransforms[i](node, context);   // ⭐ enter 阶段
+    if (onExit) exitFns.push(onExit);                  // 收集 exit 回调
+  }
+  switch (node.type) {
+    case NodeTypes.COMMENT: ... break;
+    case NodeTypes.INTERPOLATION: break;               // 插值无子节点
+    case NodeTypes.IF:
+    case NodeTypes.FOR:
+    case NodeTypes.ELEMENT:
+    case NodeTypes.ROOT:
+      traverseChildren(node, context);                 // 先递归子节点
+      break;
+  }
+  // ⭐ 子节点全部处理完才执行 exit —— 后进先出 = 洋葱模型
+  context.currentNode = node;
+  let i = exitFns.length;
+  while (i--) exitFns[i]();
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么必须有 exit 阶段？</span><br>
+    v-if 的 transform（enter）先于子节点的 transform 跑，但它的「变身」必须等
+    <b>子树处理完</b>（children 的 patchFlag、静态提升都定了）才能包装 —— exit 就是干这个的。
+    同时 transform 顺序有讲究：<b>vFor 必须在 vIf 之前</b>（同一元素上 v-for 先于 v-if 语义），
+    编译器靠数组顺序硬约束这一点。
+  </div>
+
+  <h2>32.2 一场 v-if 的完整变身</h2>
+  <pre class="code" data-title="v-if 的 enter / exit 两步"><code>// enter（transformIf.ts）：只是登记结构指令，先不动手
+function createStructuralDirectiveTransform(name, fn) {
+  return (node, context) =&gt; {
+    if (node.type !== NodeTypes.ELEMENT) return;
+    const { directives } = node;              // DirectiveNode 数组
+    for (const dir of directives) {
+      if (dir.name === 'if' || dir.name === 'else-if' ...) {
+        fn(node, dir, context);               // ⭐ 记录到 node 的 vIf 属性
+      }
+    }
+    return () =&gt; { /* exit 时才真正处理 */ };
+  };
+}
+
+// exit：把 DirectiveNode 消化掉，换成 ConditionalExpression 节点
+// &lt;p v-if="ok"&gt;hi&lt;/p&gt;  →  codegenNode = { type: IF, branches: [...], consistent: true }
+// codegen 时打印成：ok ? (createVNode("p", null, "hi")) : createCommentVNode("v-if", true)
+// ⭐ 没有 else 分支时补一个注释 vnode 占位 —— 这就是为什么 v-if=false 会留下 &lt;!----&gt;</code></pre>
+
+  <h2>32.3 helper 注入：按需 import 的秘密</h2>
+  <pre class="code" data-title="context.helper：用到了才登记"><code>// transform 过程中，任何 transform 都可以：
+context.helper(CREATE_COMMENT_VNODE);   // → helpers: Set { createCommentVNode }
+
+// codegen 时统一打印：
+import { createVNode as _createVNode, createCommentVNode as _createCommentVNode }
+  from "vue";
+// ⭐ 模板里没用到的 helper 根本不出现 —— 这就是运行时 API 能 tree-shaking 的编译期配合
+// （呼应第 15 章：你可以只打包 createVNode + reactive，渲染器其余部分摇掉）</code></pre>
+  <table>
+    <tr><th>官方内置 transform</th><th>职责</th><th>去向</th></tr>
+    <tr><td><code class="inline">transformIf</code></td><td>v-if/else-if/else → 条件表达式</td><td>codegenNode.IF</td></tr>
+    <tr><td><code class="inline">transformFor</code></td><td>v-for → <code class="inline">renderList</code> helper 调用 + Fragment 包裹</td><td>codegenNode.FOR</td></tr>
+    <tr><td><code class="inline">transformElement</code></td><td>汇总 props/指令 → createVNode 参数</td><td>codegenNode.ELEMENT</td></tr>
+    <tr><td><code class="inline">hoistStatic</code></td><td>识别纯静态子树 → 提升到 render 外</td><td>const _hoisted_1 = ...</td></tr>
+    <tr><td><code class="inline">transformText</code></td><td>文本 + 插值 → CompoundExpression</td><td>字符串拼接</td></tr>
+    <tr><td><code class="inline">transformOn</code> / <code class="inline">transformModel</code></td><td>事件 / v-model 修饰符</td><td>第 34 章的主角</td></tr>
+  </table>
+
+  
+  <h2>32.5 亲手写一个 transform：编译期给静态 class 加前缀</h2>
+  <p>transform 不是黑盒 —— compiler 的选项直接暴露 <code class="inline">nodeTransforms</code> 数组，
+  你的函数可以和官方 transform 并排坐：</p>
+  <pre class="code" data-title="一个自定义 nodeTransform"><code>import { baseParse } from '@vue/compiler-core';
+
+// 需求：所有静态 class 值加命名空间前缀（微前端样式隔离的编译期方案）
+const nsTransform = (node, context) =&gt; {
+  if (node.type !== 1 /* NODE_TYPES.ELEMENT */) return;   // enter：只关心元素
+
+  return () =&gt; {                                            // exit：等子树处理完
+    const prop = node.props.find(
+      (p) =&gt; p.type === 6 /* ATTRIBUTE */ &amp;&amp; p.name === 'class'
+    );
+    if (prop?.value) {
+      prop.value.content = 'myapp-' + prop.value.content;   // 直接改 AST！
+    }
+  };
+};
+
+const { code } = baseCompile('&lt;button class="btn"&gt;OK&lt;/button&gt;', {
+  nodeTransforms: [nsTransform],   // ⭐ 和官方 transform 并排执行
+});
+// 产物：_createVNode("button", { class: "myapp-btn" }, "OK")</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 这扇门后面是什么</span><br>
+    官方全家桶（transformIf / hoistStatic / transformElement…）和你的自定义 transform
+    走同一个入口、同一套洋葱模型（32.1 节）—— 没有「内部特权」。
+    这扇门是整个 Vue 生态魔改力的来源：<b>uni-app 把节点编译成小程序标签</b>、
+    <b>Vue Macros 把宏编译成普通代码</b>、<b>低代码平台把设计稿编译成组件</b>，
+    全都是往这个数组里塞自己的 transform。记住 enter 改结构、exit 改产物的分寸，
+    你就有了「改写 Vue 语言本身」的能力。
+  </div>
+
+  <h2>32.4 动手写一个编译期 transform：构建时替你写代码</h2>
+  <p>
+    <code class="inline">nodeTransforms / directiveTransforms</code> 不只是官方内部清单 ——
+    它们是通过 <code class="inline">compilerOptions</code> 公开的插件 API（vite 的 <code class="inline">vue()</code> 插件可透传）。
+    来写一个把 <code class="inline">v-theme="'dark'"</code> 在编译期转成 style 的 transform：
+  </p>
+  <pre class="code" data-title="自定义 nodeTransform（骨架）"><code>const themeThemes = { dark: 'color:#eee;background:#222', light: 'color:#222;background:#fff' };
+
+const themeTransform = (node, context) =&gt; {
+  if (node.type !== NodeTypes.ELEMENT) return;
+  return () =&gt; {                                   // ⭐ exit 阶段（32.1 洋葱模型）
+    const dir = node.props.find(p =&gt; p.name === 'theme');   // DirectiveNode
+    if (!dir) return;
+    const themeName = dir.exp?.content;            // 'dark'
+    // 编译期查表 → 直接改 AST：合并进 staticProps
+    context.helper(MERGE_PROPS);                   // 需要的 helper 自己登记（32.3）
+    node.props = node.props.filter(p =&gt; p !== dir);
+    node.props.push({
+      type: NodeTypes.ATTRIBUTE,
+      name: 'style', value: { content: themeThemes[themeName] },
+    });
+  };
+};
+
+// vite.config.ts 里接入：
+// vue({ template: { compilerOptions: { nodeTransforms: [themeTransform] } } })</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 编译期 transform vs 运行时指令：一倍差距</span><br>
+    同样一个「主题」需求：运行时指令每个实例挂钩子、每次更新跑判断；
+    编译期 transform 在构建时就把代码写死 —— 运行时<b>零成本</b>。
+    unplugin-vue-macros、官方 v-model 的修饰符展开，全是这条路线。
+    「能用编译期解决的不留给运行时」—— Vue3 的 compiler-centric 哲学。
+  </div>
+
+
+  <h2>32.5 v-for 的 transform 走查（和 v-if 的相遇规则）</h2>
+  <pre class="code" data-title="transformFor 的产物结构（简化）"><code>// exit 阶段把 DirectiveNode 消化成 FOR 结构：
+codegenNode = {
+  type: NodeTypes.FOR,
+  source: "list",             // v-for="item in list" 的源
+  valueAlias: "item",         // 别名
+  keyAlias: undefined,        // v-for="(v, k) in obj" 时的 key 别名
+  children: [ ...循环体... ],
+}
+// codegen 打印成：
+_createBlock(_Fragment, { key: item.id },
+  (_openBlock(true), _createBlock(_Fragment, { key: 0 },
+    _renderList(list, (item) =&gt; [...循环体...]), 128 /* KEYED_FRAGMENT */)))
+// ⭐ v-for 天然是 Block 边界：循环体每次渲染开新 Block（30 章 dynamicChildren 以它为界）</code></pre>
+  <table>
+    <tr><th>规则</th><th>说明</th></tr>
+    <tr><td>v-for 比 v-if 先变身</td><td>transformFor 排在 transformIf 之前（数组顺序硬编码）—— 同元素时 v-if 作用在「每轮循环体」上</td></tr>
+    <tr><td>同元素 v-if 拿不到 item</td><td>v-if 条件在「外层作用域」求值，访问不到 v-for 变量 —— 官方明令禁止；正确姿势是包一层 <code class="inline">&lt;template v-for&gt;</code></td></tr>
+    <tr><td>key 写在真实元素上</td><td>写在 template v-for 标签上会被警告 —— key 属于循环体的 vnode（25.5）</td></tr>
+    <tr><td>解构语法直接支持</td><td><code class="inline">v-for="{ id, name } in list"</code> —— parse 阶段把解构模式当普通表达式收集（31.5）</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么 v-for 一定开新 Block</span><br>
+    列表长度可变 → 子树结构不稳定 → 静态收集（30 章 Block Tree）必须在这里「重新开始」。
+    这也是「大列表天然比静态页面慢」的算法根源：v-for 区域永远享受不到 Block 级跳过，
+    优化只剩三件武器：正确的 key（18 章）、就地复用（diff）、以及工程手段虚拟滚动。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：transform</summary>
+    <div class="quiz-body">
+      <p>1. v-if 的 transform 为什么必须在 exit 阶段做「真正变身」？<br>
+         2. 一个组件模板里一个 helper 都没用（纯静态），import 会是什么样？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 因为分支的判定代码要引用子树的处理结果（分支内容的 codegenNode、是否含组件、
+        patchFlag 等）。enter 时子树还没处理完，只有 exit（子树齐备后）才能安全地包装成
+        ConditionalExpression。<br>
+        2. import 列表为空（或只剩最小集）—— helpers 按需登记的机制保证零冗余；
+        这类纯静态组件的 render 几乎是空函数 + 一堆提升常量。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="transform">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#ast"><span class="dir">上一章</span><span class="t">← AST 与 tokenizer：模板变成树</span></a>
+    <a class="next" href="#codegen"><span class="dir">下一章</span><span class="t">codegen：render 印刷厂 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 33 codegen ============ -->
+<section class="page" id="page-codegen">
+  <div class="kicker">第 33 章 · 编译器篇</div>
+  <h1>codegen：render 函数的印刷厂</h1>
+  <p class="lead">
+    走完 parse 和 transform，AST 已经是「打印就绪」的状态。codegen 做的事朴素到让人意外：
+    <b>深度优先遍历 AST，按节点类型拼字符串</b>。它就是一台函数式印刷厂 ——
+    官方源码 <code class="inline">compiler-core/src/codegen.ts</code>。
+  </p>
+
+  <h2>33.1 CodegenContext：一个小字符串拼接器</h2>
+  <pre class="code" data-title="CodegenContext（源码级简化）"><code>function createCodegenContext(ast, options) {
+  const context = {
+    code: '',                    // 最终产物（或 push 进数组最后 join）
+    level: 0,                    // 缩进层级
+    helper(key) {
+      context.helpers.add(key);  // 与 transform 阶段登记对齐（第 32 章）
+      return `_${helperNameMap[key]}`;
+    },
+    push(code, node) { context.code += code; },
+    indent() { context.level++; newline(); },   // 新 level：缩进 +1 并换行
+    deindent() { context.level--; newline(); },
+    newline() { push('\\n' + '  '.repeat(level)); },
+  };
+  return context;
+}</code></pre>
+
+  <h2>33.2 genNode：一张分发表</h2>
+  <p>打印的核心是一个 switch 分发表 —— 每种 AST 节点对应一个 gen 函数：</p>
+  <table>
+    <tr><th>gen 函数</th><th>节点</th><th>打印出的代码形态</th></tr>
+    <tr><td><code class="inline">genFunctionExpression</code></td><td>render 本体</td><td><code class="inline">const _sfc_main = { setup() {...} }</code> 外壳</td></tr>
+    <tr><td><code class="inline">genVNodeCall</code></td><td>transform 产物</td><td><code class="inline">_createVNode("div", props, children, patchFlag)</code></td></tr>
+    <tr><td><code class="inline">genElement</code> 系列</td><td>ElementNode</td><td>带 patchFlag/dynamicChildren 的 createVNode</td></tr>
+    <tr><td><code class="inline">genText</code> / <code class="inline">genInterpolation</code></td><td>文本/插值</td><td><code class="inline">"hello "</code> / <code class="inline">_toDisplayString(name)</code></td></tr>
+    <tr><td><code class="inline">genCompoundExpression</code></td><td>混合表达式</td><td><code class="inline">"hello " + _toDisplayString(name)</code></td></tr>
+    <tr><td><code class="inline">genIf</code> / <code class="inline">genFor</code></td><td>结构指令产物</td><td>三元表达式 / 带缓存的 createFor</td></tr>
+    <tr><td><code class="inline">genHoisted</code></td><td>静态提升节点</td><td>render 外的 <code class="inline">const _hoisted_x = ...</code></td></tr>
+  </table>
+
+  <h2>33.3 同一棵 AST 的两种产物</h2>
+  <p>
+    同一个模板，编译目标不同，产物不同 —— 差异全在「变量从哪来」：
+  </p>
+  <pre class="code" data-title="运行时编译（with 版）vs 预编译（import 版）"><code>// ① 运行时编译（vue.global.js 的 compiler 在浏览器里跑，包大但即开即用）
+const render = new Function('with (this) { return _createVNode("div", null, name) }');
+//                       ⭐ with 前缀：name 直接走作用域链找到实例数据（非严格模式）
+
+// ② 预编译（SFC 构建时产出，prefixIdentifiers 已把变量前缀化）
+import { createVNode as _createVNode } from "vue";
+function render(_ctx, _cache) {
+  return _createVNode("div", null, _ctx.name);   // ⭐ 显式 _ctx 前缀
+}
+// 预编译产物可以走严格模式 + 完整 tree-shaking + 更小的运行时（不需要 compiler）
+// 这就是「runtime-only 构建」比「完整版」小 40% 的原因</code></pre>
+
+  <h2>33.4 SSR 通道：同一棵树的另一台打印机</h2>
+  <p>
+    codegen 还有个平行产物：<code class="inline">ssrRender</code> 函数 —— 不生成 vnode 调用，
+    而是生成 <b>字符串拼接</b>代码（<code class="inline">_push('&lt;div&gt;')</code> ...），
+    供服务端直出 HTML。同一个 AST、两台打印机、两个产物 —— 第 36 章讲消费端。
+  </p>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么 codegen 值得一读</span><br>
+    它是「理解编译产物」的最短路径：面试官让你手写「模板编译成 render 函数」，
+    本质就是 parse + 一把 switch 的 codegen（第 51 章的作业③）。
+    读完这章你会发现 Vue 编译器没有一处神秘 —— 全是字符串工艺。
+  </div>
+
+  
+  <h2>33.5 终极走查：一段模板的完整产物逐行注释</h2>
+  <p>把第 25~28 章的知识压进一段产物里 —— 每一行都注明它出自哪个环节：</p>
+  <pre class="code" data-title="模板：">&lt;template&gt;
+  &lt;button class="btn" @click="onClick"&gt;保存&lt;/button&gt;
+&lt;/template&gt;</pre>
+  <pre class="code" data-title="产物（带逐行注释）："><code>import { createVNode as _createVNode, vModelText as _vModelText,
+         withDirectives as _withDirectives, openBlock as _openBlock,
+         createBlock as _createBlock } from "vue"
+
+// ↑ helpers 注入（32.3）：模板里用到什么才 import 什么
+
+const _hoisted_1 = { class: "btn" }
+// ↑ 静态提升（30.3 / hoistStatic）：这个 props 对象完全静态，提到 render 外，
+//   每次渲染复用同一个对象引用 → 帮 shouldUpdateComponent 的浅比较直接短路
+
+export function render(_ctx, _cache) {
+  return (_openBlock(), _createBlock("button", _hoisted_1, {
+    onClick: _cache[0] || (_cache[0] = (...args) =&gt; _ctx.onClick(...args)),
+    //        ↑ cacheHandlers（30.6）：内联箭头函数缓存进 _cache，
+    //          引用不再每次渲染变化 → props 浅比较视为「没变」
+
+    onClick: ... , onVnodeMounted: ...
+  }, "保存"))
+}
+//   ↑ "保存" 是静态文本（30.2 的 patchFlag 分析里标记为静态，不进 dynamicChildren）
+//   ↑ _createBlock：开启 Block，本节点成为 Block 根（30.5）</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 验证产物的正确姿势</span><br>
+    不要背这些注释 —— 打开 <b>vuejs.org 的在线编译器（Template Explorer）</b>，
+    左边贴模板右边看产物，再对照本章的每一行注释做「产地确认」。
+    能把每一行产物指认到某个 transform 的那一刻，编译器对你就没有秘密了。
+    亲手玩过的记忆，比读十遍文章都牢。
+  </div>
+
+  <h2>33.5 同一棵树的第二台打印机：ssrRender 产物对照</h2>
+  <p>33.4 说 SSR 有平行产物，展开看具体形态 —— 同一个模板 <code class="inline">&lt;p&gt;{{ n }}&lt;/p&gt;</code>：</p>
+  <pre class="code" data-title="client 产物 vs ssr 产物"><code>// ① 客户端 render（你熟悉的）：
+function render(_ctx) {
+  return _createVNode("p", null, _toDisplayString(_ctx.n));
+}
+
+// ② 服务端 ssrRender（ssr: true 的编译目标）：
+function ssrRender(_ctx, _push, _parent, _attrs) {
+  _push(`&lt;p${_ssrRenderAttrs(_attrs)}&gt;${_ssrInterpolate(_ctx.n)}&lt;/p&gt;`);
+}
+// ⭐ 没有 vnode、没有 patchFlag、没有 children 数组 —— 纯字符串拼接</code></pre>
+  <table>
+    <tr><th>差异点</th><th>client</th><th>ssr</th></tr>
+    <tr><td>事件（onClick）</td><td>生成 onXxx prop</td><td><b>整体跳过</b> —— 服务端没有交互，压根不生成</td></tr>
+    <tr><td>动态更新（patchFlag）</td><td>精确标记供 patch 用</td><td>无意义，全部省略</td></tr>
+    <tr><td>ref / 指令 mounted</td><td>运行时执行</td><td>跳过，只在 hydration 补挂（36 章）</td></tr>
+    <tr><td>产物体积</td><td>大</td><td>小且执行快（无对象分配）</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 「一台 AST 两台打印机」的架构意义</span><br>
+    transform 产出的 codegenNode 是「中立的中间表示」—— 打印成 vnode 调用还是字符串拼接，
+    只是两个不同的 genNode 分发表。这和现代编译器的多后端设计（一份 IR，多个目标平台）完全同构。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：codegen</summary>
+    <div class="quiz-body">
+      <p>1. with(this) 版和 _ctx 前缀版最大的工程差异是什么？<br>
+         2. patchFlag 这个数字是在哪一步被打印进参数的？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. with 版依赖非严格模式的作用域链查找，无法 tree-shaking、无法静态分析；
+        _ctx 版显式声明依赖来源，可做 tree-shaking、TS 类型推导和更小的运行时。<br>
+        2. transform 阶段（transformElement）就已经把 patchFlag 计算好存进 codegenNode，
+        codegen 的 genElement 只是原样打印 —— 「计算」与「打印」分离，是三段流水线的分工原则。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="codegen">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#transform"><span class="dir">上一章</span><span class="t">← transform：指令的变身术</span></a>
+    <a class="next" href="#syntax"><span class="dir">下一章</span><span class="t">v-model 与事件修饰符 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 34 syntax ============ -->
+<section class="page" id="page-syntax">
+  <div class="kicker">第 34 章 · 编译器篇</div>
+  <h1>v-model 与事件修饰符：语法糖的编译真相</h1>
+  <p class="lead">
+    你写得最顺手的几个语法 —— <code class="inline">@click.stop</code>、<code class="inline">v-model</code>、
+    <code class="inline">@keyup.enter</code> —— 全是编译期展开的语法糖。
+    本章对照产物逐个拆解，看完你会获得「模板里没有魔法」的终极平静。
+  </p>
+
+  <h2>34.1 事件修饰符：每个都是一小段内联代码</h2>
+  <pre class="code" data-title="修饰符 → 编译产物对照"><code>// 你写的：
+&lt;button @click.stop.prevent="onClick" @keyup.enter="onEnter"&gt;&lt;/button&gt;
+
+// 编译产物（transformOn + 修饰符处理，简化）：
+_createVNode("button", {
+  onClick: _withModifiers(_onClick, ["stop", "prevent"]),
+  onKeyup: _withKeys(_onEnter, ["enter"])
+})
+
+// ⭐ 注意两层设计：
+// - .stop/.prevent/.self/.capture 等是「通用」修饰符 → 一个通用 helper _withModifiers
+//   （运行时按 flags 位运算判断，因为组合太多，内联太长）
+// - .enter/.tab/.delete 等按键修饰符 → _withKeys（读 e.key 判断）</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么不全内联？</span><br>
+    Vue2 时代确实是纯内联（<code class="inline">$event.stopPropagation()</code> 直接写进产物）；
+    Vue3 发现修饰符组合爆炸（2ⁿ 种），改用 <b>运行时 helper + 位运算 flags</b>：
+    编译期把修饰符压成数字，运行时一次判断。这是「内联 vs helper」的经典权衡 ——
+    简单修饰符（.once）内联，组合型修饰符走 helper。
+  </div>
+
+  <h2>34.2 v-model：三种目标，一种思想</h2>
+  <table>
+    <tr><th>用在</th><th>编译产物</th><th>同步事件</th></tr>
+    <tr><td><code class="inline">&lt;input type="text"&gt;</code></td><td><code class="inline">modelValue prop + onUpdate:modelValue + vModelText 指令</code></td><td>input（.lazy 则 change）</td></tr>
+    <tr><td><code class="inline">&lt;input type="checkbox"&gt;</code></td><td>同上，但走 <code class="inline">vModelCheckbox</code></td><td>change</td></tr>
+    <tr><td><code class="inline">&lt;select&gt;</code> / <code class="inline">&lt;textarea&gt;</code></td><td><code class="inline">vModelSelect</code> / <code class="inline">vModelText</code></td><td>change / input</td></tr>
+    <tr><td>组件上</td><td><code class="inline">modelValue: x, 'onUpdate:modelValue': $event =&gt; x = $event</code></td><td>子组件 emit('update:modelValue')</td></tr>
+  </table>
+  <pre class="code" data-title="组件上的 v-model 编译产物（最有价值的一行）"><code>_createVNode(MyInput, {
+  modelValue: text,
+  "onUpdate:modelValue": $event =&gt; ((text) = $event)
+})
+// ⭐ 所谓「双向绑定」= 传一个 prop + 传一个改自己的回调。
+// 和第 22 章 emit 的结论接上了：事件就是调 props 里的函数。
+// v-model:foo 是同一个糖的带参数版本（prop: foo + onUpdate:foo）</code></pre>
+
+  <h2>34.3 .lazy / .trim / .number 落在哪里？</h2>
+  <p>
+    这三个不是编译期展开的 —— 它们作为 <b>modifiers 对象</b>传给第 26 章讲过的
+    <code class="inline">vModelText</code> 运行时指令，由它决定监听 input 还是 change、
+    回写前要不要 trim / 转数字。回忆一下那条 <code class="inline">beforeUpdate 里 activeElement 检查</code> ——
+    「正在输入时不覆盖」就是 .trim/.number 不打断你打字的关键。
+  </p>
+  <div class="callout tip">
+    <span class="tag">💡 模板里没有魔法，只有分工</span><br>
+    编译期能确定的（事件名、prop 名、修饰符 flags）→ 编译期展开；
+    依赖运行时状态的（输入焦点、组合键）→ 运行时指令/helper。
+    Vue 团队对每个语法糖都做过这道选择题 —— 你现在有能力看懂他们的答案了。
+  </div>
+
+  
+  <h2>34.5 语法糖速查总表：一张表查完所有糖</h2>
+  <table>
+    <tr><th>你写的</th><th>编译产物</th><th>备注</th></tr>
+    <tr><td><code class="inline">@click.stop</code></td><td><code class="inline">withModifiers(fn, ["stop"])</code></td><td>通用修饰符 → 位运算 flags（34.1）</td></tr>
+    <tr><td><code class="inline">@keyup.enter</code></td><td><code class="inline">withKeys(fn, ["enter"])</code></td><td>按键修饰符独立 helper</td></tr>
+    <tr><td><code class="inline">@click.once</code></td><td>包装 once 标志的 fn</td><td>在 withModifiers flags 里</td></tr>
+    <tr><td><code class="inline">v-model="text"</code></td><td><code class="inline">modelValue + onUpdate:modelValue + vModelText 指令</code></td><td>组件则只传 prop + 回调（34.2）</td></tr>
+    <tr><td><code class="inline">v-model.lazy="t"</code></td><td>同上，modifiers: { lazy: true }</td><td>监听 change 而非 input（运行时判定）</td></tr>
+    <tr><td><code class="inline">v-once</code></td><td>节点打 <code class="inline">ONCE</code> 标记，进 <code class="inline">_cache</code></td><td>二次渲染直接取缓存，跳过整个子树</td></tr>
+    <tr><td><code class="inline">v-memo="[a]"</code></td><td><code class="inline">_cache[i] 依赖比对</code></td><td>手动挡缓存（第 49.2 节）</td></tr>
+    <tr><td><code class="inline">v-pre</code></td><td>跳过编译，原样输出 mustache</td><td>展示源码 / 逃避编译</td></tr>
+    <tr><td><code class="inline">v-html="x"</code></td><td><code class="inline">"innerHTML": x</code></td><td>⚠️ 无自动消毒，XSS 责任自负</td></tr>
+    <tr><td><code class="inline">v-cloak</code></td><td>不编译</td><td>CSS 约定：编译完成前隐藏挂载点</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 用法</span><br>
+    面试遇到「谈谈 XX 的实现」：先定位它在表里的行，再顺着「编译产物 → 运行时 helper/指令 →
+    对应章节」三步走。全部语法糖的归宿只有两种：<b>编译期展开成确定性代码</b>，或
+    <b>携带 flags 交给运行时 helper</b> —— 没有第三种（34.4 节的选择题）。
+  </div>
+
+  <h2>34.4 编译宏：不是函数的「函数」</h2>
+  <p>
+    <code class="inline">&lt;script setup&gt;</code> 里那些不需要 import 的
+    <code class="inline">defineProps / defineEmits / defineExpose / defineOptions / defineModel</code>，
+    叫<b>编译宏（compiler macros）</b> —— 它们长得像函数调用，但<b>运行时不存在</b>：
+  </p>
+  <pre class="code" data-title="编译前 vs 编译后"><code>// 你写的：
+const props = defineProps({ msg: String });
+const emit = defineEmits(['change']);
+defineExpose({ reset });
+
+// 编译产物（script setup → setup()）：
+props: { msg: { type: String } },           // ⭐ defineProps 被「原地拆开」挂到组件选项
+emits: ['change'],                          // defineEmits 同理
+setup(__props, { expose }) {
+  expose({ reset });                        // defineExpose 变成一次普通调用
+  ...
+}
+// defineModel（3.4+）展开成：prop + emit('update:xxx') + 内部 ref 的三件套（34.2 的糖）</code></pre>
+  <table>
+    <tr><th>因此带来的约束</th><th>原因</th></tr>
+    <tr><td>不用 import（import 了反而报错）</td><td>它们是编译器关键字，运行时根本没有这个函数</td></tr>
+    <tr><td>参数不能写运行时逻辑（如三元、变量）</td><td>宏在<b>编译期</b>求值，执行代码时它已经消失了</td></tr>
+    <tr><td>只能在 <code class="inline">&lt;script setup&gt;</code> 顶层调用</td><td>编译器只在顶层扫描宏</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 宏与 31.5 的合谋</span><br>
+    defineProps 把 props 声明<b>编译期静态化</b>，编译器由此拿到完整的绑定信息
+    （哪些来自 props、哪些来自 setup），31.5 的前缀化才能生成「闭包直取」代码。
+    <b>宏不是语法糖，是编译器打开 <code class="inline">&lt;script setup&gt;</code> 优化的钥匙孔</b> ——
+    面试聊到「script setup 为什么快」，宏 + 前缀化两点缺一不可。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：语法糖</summary>
+    <div class="quiz-body">
+      <p>1. 组件上的 v-model 和 v-model:title 分别编译成什么？<br>
+         2. @click.stop 为什么用 helper 而不是直接内联 $event.stopPropagation()？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 前者 = modelValue prop + onUpdate:modelValue 回调；后者 = title prop + onUpdate:title 回调 ——
+        同一套糖，只是参数化了名字。组件内部 defineEmits(['update:modelValue']) 配合使用。<br>
+        2. 修饰符可组合（.stop.prevent.self.capture... 共 2ⁿ 组合），内联代码会爆炸；
+        编译期把组合压成位 flags + 一个 _withModifiers helper，运行时一次位运算判断 ——
+        产物体积和判断成本都恒定。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="syntax">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#codegen"><span class="dir">上一章</span><span class="t">← codegen：render 印刷厂</span></a>
+    <a class="next" href="frontier.html#error"><span class="dir">下一章</span><span class="t">错误处理：捕获与传播 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+<script src="assets/labs/common.js?v=1"></script>
+<script src="assets/labs/compiler.js?v=1"></script>
+</body>
+</html>

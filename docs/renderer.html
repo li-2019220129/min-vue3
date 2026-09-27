@@ -1,0 +1,1600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 渲染器篇</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 15 renderer ============ -->
+<section class="page" id="page-renderer">
+  <div class="kicker">第 15 章 · 渲染器篇</div>
+  <h1>渲染器：分层的艺术</h1>
+  <p class="lead">
+    响应式系统已经毕业，现在换个口味：看 Vue 怎么把「数据」变成「页面上的像素」。
+    本章有两个宝藏：跨平台的 nodeOps 适配器，和一个被无数框架抄袭的事件缓存技巧 —— invoker。
+  </p>
+
+  <h2>15.1 nodeOps：把 DOM 装进「接口盒子」</h2>
+  <p>
+    第 1 章说过：runtime-core 不认识 DOM。但它渲染时确实需要「插入节点、删除节点、改文本」这些动作。
+    怎么办？<b>我不亲自干，我定义标准，谁来谁干</b>。runtime-dom 交上了自己的答卷：
+  </p>
+  <pre class="code" data-title="packages/runtime-dom/src/nodeOps.ts"><code>// 主要是对节点元素的增删改查
+export const nodeOps = {
+  insert(el, parent, anchor) {
+    parent.insertBefore(el, anchor || null);   // 插入（anchor 指定插到谁前面）
+  },
+  remove(el) {
+    const parent = el.parentNode;
+    parent && parent.removeChild(el);          // 删除
+  },
+  createElement: (type) => document.createElement(type),  // 创建元素
+  createText: (text) => document.createTextNode(text),    // 创建文本节点
+  setText: (node, text) => (node.nodeValue = text),       // 改文本节点的字
+  setElementText: (el, text) => (el.textContent = text),  // 改元素的内容
+  parentNode: (node) => node.parentNode,
+  nextSibling: (node) => node.nextSibling,
+};</code></pre>
+  <p>八个纯函数，全是 DOM API 的薄封装。然后 runtime-dom 把它们和 patchProp 打包，注入给 core：</p>
+  <pre class="code" data-title="packages/runtime-dom/src/index.ts + runtime-core/src/index.ts"><code>// runtime-dom：组装渲染选项（接口实现）
+export const renderOptions = Object.assign(nodeOps, { patchProp });
+
+export const render = (vnode, container) => {
+  createRenderer(renderOptions).render(vnode, container);  // 依赖注入！
+};
+
+// runtime-core：拿到一整套「操作能力」，但不知道背后是浏览器
+export function createRenderer(renderOptions) {
+  const {
+    insert: hostInsert,
+    remove: hostRemove,
+    createElement: hostCreateElement,
+    setElementText: hostSetElementText,
+    setText: hostSetText,
+    parentNode: hostParentNode,
+    nextSibling: hostNextSibling,
+    patchProp: hostPatchProp,
+  } = renderOptions;
+
+  // core 不关心如何渲染
+  const render = (vnode, container) => {
+    console.log(vnode, container);   // 🚧 项目进度：render 骨架已立，等你来写
+  };
+  return { render };
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 这就是「依赖倒置」</span><br>
+    高层模块（core）定义抽象接口，低层模块（dom）提供具体实现，通过参数注入。
+    换一个 runtime-xxx 就能渲染到 canvas、WebGL、原生 App —— 响应式系统一行动不用改。
+    <b>框架的跨平台能力，从来不是靠兼容，而是靠分层。</b>
+  </div>
+
+  <h2>15.2 patchProp：属性的分流处理</h2>
+  <p> vnode 的 props 千奇百怪，patchProp 按类型分流到四个处理模块：</p>
+  <pre class="code" data-title="packages/runtime-dom/src/patchProp.ts"><code>function patchProp(el, key, prevValue, nextValue) {
+  if (key === "class") {
+    return patchClass(el, nextValue);          // class 走 className（比 setAttribute 快）
+  } else if (key === "style") {
+    return patchStyle(el, prevValue, nextValue);  // style 要做新旧 diff
+  } else if (/^on[^a-z]/.test(key)) {          // onClick、oninput → 事件
+    return patchEvent(el, key, nextValue);
+  } else {
+    return patchAttr(el, key, nextValue);      // 其他 → setAttribute
+  }
+}</code></pre>
+  <p>四个小模块中最普通的是 attr：</p>
+  <pre class="code" data-title="modules/patchAttr.ts / patchClass.ts / patchStyle.ts"><code>// patchAttr：有值设值，没值删掉
+export default function patchAttr(el, key, nextValue) {
+  if (nextValue) el.setAttribute(key, nextValue);
+  else el.removeAttribute(key);
+}
+
+// patchClass：清空用 removeAttribute（注意不是设空字符串）
+export default function patchClass(el, value) {
+  if (!value) el.removeAttribute("class");
+  else el.className = value;
+}
+
+// patchStyle：新样式逐条应用；旧样式里新值没有的 → 清空
+export default function patchStyle(el, prevValue, nextValue) {
+  let style = el.style;
+  for (let key in nextValue) style[key] = nextValue[key];
+  if (prevValue) {
+    for (let key in prevValue) {
+      if (nextValue[key] == null) style[key] = '';   // 清掉被删掉的样式（官方用空串，不是 null）
+    }
+  }
+}</code></pre>
+
+  <h2>15.3 ⭐ patchEvent：invoker，事件缓存的绝招</h2>
+  <p>思考题：每次渲染都会给元素挂新的 onClick 函数。最笨的写法：</p>
+  <pre class="code" data-title="朴素写法（每次更新 2 次 DOM 调用）"><code>el.removeEventListener("click", oldFn);   // 摘掉旧的
+el.addEventListener("click", newFn);       // 挂上新的
+// ⚠️ 每次渲染都来这么一下，两个昂贵的 DOM 调用</code></pre>
+  <p>源码的解法妙到毫巅：<b>真正挂到元素上的永远是一个不变的 invoker 壳子，
+    用户的回调藏在 <code class="inline">invoker.value</code> 里随时替换</b>：</p>
+  <pre class="code" data-title="packages/runtime-dom/src/modules/patchEvent.ts"><code>function createInvoker(value) {
+  const invoker = (e) => invoker.value(e);   // 壳子：点击时才去找此刻的 value
+  invoker.value = value;                     // 回调挂在壳子的 value 属性上
+  return invoker;
+}
+
+export default function patchEvent(el, name, nextValue) {
+  const invokers = el._vei || (el._vei = {});     // 元素级缓存表：_vei = {onClick: invoker}
+  const eventName = name.slice(2).toLowerCase();
+  const existingInvoker = invokers[name];
+
+  if (nextValue && existingInvoker) {
+    return (existingInvoker.value = nextValue);   // 情况A：已挂过 → 只换 value！0 次 DOM 调用
+  }
+  if (nextValue) {
+    const invoker = (invokers[name] = createInvoker(nextValue));
+    return el.addEventListener(eventName, invoker);  // 情况B：首次 → 挂壳子
+  } else if (existingInvoker) {
+    el.removeEventListener(eventName, existingInvoker); // 情况C：新值为空 → 摘除
+    invokers[name] = undefined;
+  }
+}</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 比喻时间：公司前台</span><br>
+    addEventListener 像雇一位<b>前台</b>：真正的前台（invoker）永远不换人；
+    客户来了（点击发生）前台才喊当前负责的同事（invoker.value 回调）。
+    换负责同事（更新回调）只需换工牌，不用解雇再招聘前台 ——
+    <b>频繁变化的回调，包一层不变的外壳</b>。React 合成事件、小程序框架里都有同款思想。
+  </div>
+
+  <h2>15.4 🧪 实验：验证 invoker 只挂一次</h2>
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 invoker 事件缓存演示<span class="hint">监听「真的按钮」</span></div>
+    <div class="demo-body">
+      <p style="font-size:16.5px;margin-top:0">
+        下面这个按钮走的就是上面的 patchEvent 逻辑。每次「更新处理器」都换一个<b>全新函数</b>，
+        但注意看统计：addEventListener 只在第 1 次被调用，之后全部走 value 替换。
+        点按钮验证新回调已生效。
+      </p>
+      <div class="stat-grid">
+        <div class="stat" id="invMount"><div class="v">0</div><div class="k">addEventListener 次数</div></div>
+        <div class="stat" id="invUpdate"><div class="v">0</div><div class="k">value 替换次数</div></div>
+        <div class="stat" id="invVer"><div class="v">v1</div><div class="k">当前处理器版本</div></div>
+      </div>
+      <button class="step-btn" id="invUpdateBtn" style="margin-bottom:10px">🔄 更新事件处理器（生成全新函数）</button>
+      <div>
+        <button class="demo-btn-real" id="invRealBtn">点我试试 🖱️</button>
+        <span id="invResult" style="font-size:14px;color:var(--dim)">还没点击过</span>
+      </div>
+      <div class="console" id="invConsole" style="height:150px;margin-top:12px"></div>
+    </div>
+  </div>
+
+  <h2>15.5 渲染器的下一步（不再是剧透）</h2>
+  <p>本项目的 render 还是骨架，但本站接下来四章会带你亲手把它写完：</p>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox"><a href="#hvnode">第 16 章<br><small>h() 造 vnode</small></a></span>
+      <span class="farrow">→</span>
+      <span class="fbox blue"><a href="#mount">第 17 章<br><small>mountElement 首挂载</small></a></span>
+      <span class="farrow">→</span>
+      <span class="fbox rose"><a href="#diff">第 18 章<br><small>patch + diff + LIS</small></a></span>
+      <span class="farrow">→</span>
+      <span class="fbox"><a href="#component">第 19 章<br><small>组件化合流</small></a></span>
+    </div>
+    <div class="cap">每章的代码都能直接抄进 runtime-core/src/index.ts —— 学完四章，你就有了一个能跑的迷你 Vue</div>
+  </div>
+
+  
+  <h2>15.6 unmount：卸载一条线的完整流程</h2>
+  <p>渲染器三条线（挂载/更新/卸载）里，本章只讲了前两条。卸载虽然短，但顺序同样讲究：</p>
+  <pre class="code" data-title="unmount（教学完整版）"><code>function unmount(vnode) {
+  const { shapeFlag, children, component } = vnode;
+
+  // ① 卸载前钩子：指令 beforeUnmount（同步）、组件 beforeUnmount（pre 队列）
+  if (vnode.dirs) invokeDirectiveHook(vnode, null, null, 'beforeUnmount');
+
+  // ② KeepAlive 特判（第 24 章）：不真删，挪进缓存容器
+  if (shapeFlag &amp; ShapeFlags.COMPONENT_SHOULD_KEEP_ALIVE) {
+    vnode.ctx.deactivate(vnode);
+    return;
+  }
+
+  // ③ 按类型递归卸载
+  if (shapeFlag &amp; ShapeFlags.COMPONENT) {
+    unmount(component.subTree, null, null);       // 组件：卸载整棵渲染子树
+  } else if (shapeFlag &amp; ShapeFlags.FRAGMENT) {
+    removeFragment(vnode);                         // Fragment：沿锚点逐个删（第 25 章）
+  } else if (shapeFlag &amp; ShapeFlags.TELEPORT) {
+    vnode.type.process(vnode, null, null, null);   // Teleport：走自己的分流（第 24 章）
+  } else {
+    hostRemove(vnode.el);                          // 普通元素：一步 remove
+  }
+
+  // ④ 卸载后钩子：unmounted 进 post 队列（此刻 DOM 已不在）
+  queuePostRenderEffect(() =&gt; {
+    if (vnode.dirs) invokeDirectiveHook(vnode, null, null, 'unmounted');
+  });
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 卸载顺序的三个「必须」</span><br>
+    ① <b>钩子必须早于 remove</b>：beforeUnmount 里你还要读 DOM、做清理收尾，删了就没得读了；
+    ② <b>组件必须递归到 subTree</b>：组件 el 只是个壳（第 19 章），真正占 DOM 的是渲染子树，
+    不递归就漏删；③ <b>unmounted 必须 post 队列</b>：和 mounted 同理，要等整个卸载动作彻底完成，
+    钩子里看到的世界才是「已卸载」的世界。
+  </div>
+
+  <h2>15.6 property 还是 attribute？官方 patchProp 的最后一道分流</h2>
+  <p>
+    本项目的 patchProp 四分流（class/style/on/attr）之后还有一个隐藏问题：
+    走到 attr 分支的键，到底该 <code class="inline">setAttribute</code> 还是直接赋值给 DOM Property？
+    两者不等价 —— 这道判断在官方叫 <code class="inline">shouldSetAsProp</code>：
+  </p>
+  <pre class="code" data-title="官方 runtime-dom/src/patchProp.ts（摘录）"><code>function shouldSetAsProp(el, key, value, isSVG) {
+  if (isSVG) { ... return false; }              // svg 走 attribute
+  if (key === 'form') return false;             // 表单元素的 form 是只读 property
+  if (key === 'list' &amp;&amp; el.tagName === 'INPUT') return false;
+  if (key === 'type' &amp;&amp; el.tagName === 'TEXTAREA') return false;
+  if (key in el) return true;                   // ⭐ 核心判断：元素上存在同名 property
+  ...
+}</code></pre>
+  <table>
+    <tr><th>键</th><th>走哪条</th><th>为什么</th></tr>
+    <tr><td><code class="inline">value</code>（input）</td><td>property（el.value = x）</td><td>attribute 只设初始值，不随输入更新；property 才是「当前值」</td></tr>
+    <tr><td><code class="inline">disabled</code> / <code class="inline">checked</code></td><td>property</td><td>布尔语义：attribute 存在即 true，传 false 反而错误</td></tr>
+    <tr><td><code class="inline">innerHTML</code> / <code class="inline">textContent</code></td><td>property</td><td>attribute 表示不了「内容」</td></tr>
+    <tr><td>自定义 data-* / aria-*</td><td>attribute</td><td>它们天生就是 attribute 协议</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 双轨制的由来</span><br>
+    HTML attribute 是「标签上写死的初始值」，DOM property 是「元素对象上的实时状态」——
+    浏览器解析后 attribute 只是个「出厂快照」。Vue 替你选对轨道，就是这套判断的全部意义。
+    面试问「attribute 和 property 区别」，举 <code class="inline">input.value</code> 一例就赢。
+  </div>
+
+
+  <h2>15.7 patchElement 的快慢车道：patchFlag 的运行时消费</h2>
+  <p>
+    教学版 patchElement 是「新旧 props 全量对比」。官方编译产物带着 patchFlag（30 章），
+    运行时据此直接上快车道 —— 这是「编译反哺运行时」最直白的一段运行时代码：
+  </p>
+  <pre class="code" data-title="官方 patchElement（骨架）"><code>const patchElement = (n1, n2, parentComponent) =&gt; {
+  const el = (n2.el = n1.el);
+  const { patchFlag, dynamicChildren, dirs } = n2;
+  const oldProps = n1.props || EMPTY_OBJ, newProps = n2.props || EMPTY_OBJ;
+
+  // 官方顺序：⭐ 先比 props（快/慢车道），最后才 patchChildren —— 与 mountElement 相反
+  if (patchFlag &gt; 0) {
+    if (patchFlag &amp; PatchFlags.FULL_PROPS) {
+      patchFullProps(el, oldProps, newProps);        // 慢车道：全量 diff（教学版逻辑）
+    } else {
+      if (patchFlag &amp; PatchFlags.CLASS) hostPatchClass(el, newProps.class);  // class 专属快道
+      if (patchFlag &amp; PatchFlags.STYLE) hostPatchStyle(...);                 // style 专属快道
+      if (patchFlag &amp; PatchFlags.PROPS) {
+        // ⭐ 快车道：只比编译期登记过的 dynamicProps 数组
+        for (let i = 0; i &lt; n2.dynamicProps!.length; i++) {
+          const key = n2.dynamicProps![i];
+          const next = newProps[key], prev = oldProps[key];
+          if (next !== prev) hostPatchProp(el, key, prev, next);
+        }
+      }
+    }
+  }
+
+  patchChildren(n1, n2, el, null);       // 子节点最后处理（TEXT / ARRAY 按 shapeFlag 分流）
+  ...
+};</code></pre>
+  <table>
+    <tr><th>车道</th><th>何时走</th><th>成本</th></tr>
+    <tr><td>快车道</td><td>模板编译产物（带 dynamicProps 数组）</td><td>只比 N 个动态键，通常 0~3 个</td></tr>
+    <tr><td>慢车道</td><td>手写渲染函数 / FULL_PROPS 标记</td><td>新旧 props 全量键遍历</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 和 30 章合上盖子</span><br>
+    25 章讲「编译器怎么打 patchFlag」，本节补上「运行时怎么按 flag 挑车道」——
+    优化闭环到此合龙：<b>编译期多存一个 dynamicProps 数组，运行时每次更新省掉一整轮全量键遍历。</b>
+    面试被问「patchFlag 到底有什么用」，把快慢车道讲出来就是满分答案。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：渲染器</summary>
+    <div class="quiz-body">
+      <p>1. patchStyle 为什么要两个 for 循环？只循环 nextValue 会怎样？<br>
+         2. invoker 方案里，事件回调更新时的开销是什么量级？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 第一个循环应用新样式；第二个循环清理「旧样式里有、新样式里没有」的键 —— 缺了它，<code class="inline">{color:'red'}</code> 换成 <code class="inline">{}</code> 时红色会残留。和新旧依赖清理一个道理：<b>更新 = 加新的 + 删旧的</b>。<br>
+        2. 一次普通对象属性赋值（invoker.value = fn），O(1)，零 DOM 调用。相比摘除+重挂的两次 DOM API，快得不在一个次元。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="renderer">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="deep.html#collections"><span class="dir">上一章</span><span class="t">← Set/Map 拦截器</span></a>
+    <a class="next" href="#hvnode"><span class="dir">下一章</span><span class="t">h 与 VNode：虚拟的代价与回报 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 16 hvnode ============ -->
+<section class="page" id="page-hvnode">
+  <div class="kicker">第 16 章 · 渲染器篇</div>
+  <h1>h 与 VNode：虚拟的代价与回报</h1>
+  <p class="lead">
+    从本章起，我们亲手把 runtime-core 的骨架写满。第一块砖：虚拟节点（VNode）——
+    用 JS 对象<b>描述</b>界面，而不是直接操作界面。为什么多此一举？答案藏在一个字里：diff。
+  </p>
+
+  <h2>16.1 为什么需要 VNode</h2>
+  <p>直接操作 DOM 有什么问题？三个：</p>
+  <ol>
+    <li><b>DOM 操作昂贵</b>：一次 <code class="inline">appendChild</code> 可能触发重排/重绘，代价是 JS 对象操作的百倍量级；</li>
+    <li><b>无法比较</b>：两个真实 DOM 之间没有「新旧可比性」——改了就是改了，覆水难收；</li>
+    <li><b>强绑浏览器</b>：document 只存在于浏览器（还记得第 15 章的跨平台野心吗？）。</li>
+  </ol>
+  <p>JS 对象便宜、可保存、可比较、可跨平台 —— <b>VNode = 界面某一刻的快照</b>。渲染器的工作就是：拍快照 → 新旧快照 diff → 把差异最小化地应用到真实 DOM。</p>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox">旧 VNode 树</span>
+      <span class="farrow">+</span>
+      <span class="fbox blue">新 VNode 树</span>
+      <span class="farrow">→</span>
+      <span class="fbox rose">diff（纯 JS，超快）</span>
+      <span class="farrow">→</span>
+      <span class="fbox">最小 DOM 更新</span>
+    </div>
+    <div class="cap">昂贵操作（DOM）被「批量 + 最小化」了，便宜操作（比较对象）随便造 —— 这就是虚拟 DOM 的全部经济学</div>
+  </div>
+
+  <h2>16.2 VNode 结构解剖</h2>
+  <pre class="code" data-title="一个最小可用的 VNode 长这样"><code>{
+  __v_isVNode: true,      // 身份暗号（IS_REACTIVE 的老朋友了）
+  type: "div",            // 标签名 / 组件对象 / Text / Fragment…
+  key: null,              // diff 复用的身份证（第 18 章主角）
+  props: { class: "card", onClick: fn },
+  children: "文本" 或 [vnode, vnode, ...],
+  el: null,               // ⭐ 挂载后指向真实 DOM（VNode 与真实世界的桥）
+  shapeFlag: ShapeFlags.ELEMENT,   // 类型位标记（下节）
+}</code></pre>
+  <p>三个字段值得划重点：</p>
+  <ul>
+    <li><b><code class="inline">el</code></b>：挂载时渲染器把真实 DOM 写回 vnode.el —— diff 阶段顺着 el 就能找到真实节点，新旧 vnode 通过它「共用」一个 DOM；</li>
+    <li><b><code class="inline">key</code></b>：用户不传就用 null。为什么列表必须传 key？第 18 章你会看到没有 key 时算法直接退化；</li>
+    <li><b><code class="inline">children</code> 的两种形态</b>：字符串（文本子节点）或数组（子节点列表）—— mount 时分两条路径处理。</li>
+  </ul>
+
+  <h2>16.3 shapeFlag：一个数字背着 32 个布尔值</h2>
+  <p>VNode 可能是元素/文本/组件/Fragment，children 可能是文本/数组/插槽……如果每个可能性都存一个布尔字段，对象会又胖又慢。官方用<b>位运算</b>把所有类型压进一个数字：</p>
+  <pre class="code" data-title="位标志的思想（教学版）"><code>const ShapeFlags = {
+  ELEMENT: 1,          // 0001  是元素
+  FUNCTIONAL: 1 &lt;&lt; 1,  // 0010  是函数组件
+  STATEFUL: 1 &lt;&lt; 2,    // 0100  是有状态组件
+  TEXT_CHILDREN: 1 &lt;&lt; 3,       // 1000  children 是文本
+  ARRAY_CHILDREN: 1 &lt;&lt; 4,     // 10000 children 是数组
+};
+
+// 标记：一个数字同时记住多个事实
+let flag = ShapeFlags.ELEMENT | ShapeFlags.TEXT_CHILDREN;   // 1001 = 9
+
+// 判断：一次 &amp; 运算，比读属性还快
+if (flag &amp; ShapeFlags.ELEMENT) { /* 是元素 */ }
+if (flag &amp; ShapeFlags.ARRAY_CHILDREN) { /* children 是数组 */ }</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 位运算为什么快</span><br>
+    <code class="inline">flag &amp; 8</code> 是一次 CPU 位与指令；而 <code class="inline">obj.isElement</code> 是一次属性查找（可能走原型链）。
+    VNode 创建频率极高（每帧每节点），这种微观优化累积起来就是宏观性能。
+    Linux 的文件权限（755）、React 的 fiber flags、Vue 的 patchFlags —— 全是同一招。
+  </div>
+
+  <h2>16.4 h()：创建 VNode 的工厂</h2>
+  <p>直接写对象字面量太啰嗦，Vue 提供 h()（hyperscript，源自 HTML 的发明者超文本思路）：</p>
+  <pre class="code" data-title="可以抄进项目的 h() 实现（runtime-core）"><code>export function h(type, props, children) {
+  // 参数归一化：h("div") / h("div", props) / h("div", [], ...) 都合法
+  if (!props) props = {};
+
+  let shapeFlag = typeof type === "string"
+    ? ShapeFlags.ELEMENT          // 字符串 → 元素
+    : ShapeFlags.STATEFUL;        // 对象 → 组件（第 19 章）
+
+  if (typeof children === "string") {
+    shapeFlag |= ShapeFlags.TEXT_CHILDREN;
+  } else if (Array.isArray(children)) {
+    shapeFlag |= ShapeFlags.ARRAY_CHILDREN;
+  }
+
+  return {
+    __v_isVNode: true,
+    type, props,
+    key: props &amp;&amp; props.key != null ? props.key : null,
+    children,
+    el: null,
+    shapeFlag,
+  };
+}
+
+// 使用对照：
+// 模板 &lt;div class="card" @click="fn"&gt;hi&lt;/div&gt; 等价于：
+h("div", { class: "card", onClick: fn }, "hi");
+// children 是数组的版本：
+h("ul", null, [ h("li", { key: "a" }, "苹果"), h("li", { key: "b" }, "香蕉") ]);</code></pre>
+
+  <h2>16.5 VNode 树 ≠ 组件树</h2>
+  <p>一个容易混淆的点，先种个种子（第 19 章展开）：</p>
+  <blockquote>
+    VNode 树是「界面结构」的快照，其中某些节点的 type 是组件对象；
+    组件树是「逻辑单元」的嵌套。<b>一个组件 VNode 展开后是一整棵元素 VNode 子树</b>。
+  </blockquote>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么叫 h？</span><br>
+    h = hyperscript，"HyperText Markup Language" 里的 HTML 拆开就是 Hyperscript。
+    这个命名来自虚拟 DOM 的鼻祖 hyperscript 生态（React.createElement 的思想同源）。
+    知道来历，你就再也不会把 h 和 hash、height 之类搞混了。
+  </div>
+
+  
+  <h2>16.6 normalizeChildren：children 的七十二变与一统天下</h2>
+  <p>
+    你写 <code class="inline">h('div', null, 'hello')</code>、
+    <code class="inline">h('div', null, [h('span')])</code>、
+    <code class="inline">h(Child, null, { default: () =&gt; ... })</code> ——
+    children 的写法五花八门。官方 <code class="inline">normalizeChildren</code> 负责在 createVNode 里把它们归一：
+  </p>
+  <table>
+    <tr><th>你传的 children</th><th>归一结果</th><th>shapeFlag 标记</th></tr>
+    <tr><td>字符串</td><td>原样存 children，等 setElementText</td><td>TEXT_CHILDREN</td></tr>
+    <tr><td>数组</td><td>逐项校验/归一（嵌套数组拍平）</td><td>ARRAY_CHILDREN</td></tr>
+    <tr><td>组件 + 单个函数</td><td>包成 <code class="inline">{ default: fn }</code></td><td>SLOTS_CHILDREN</td></tr>
+    <tr><td>组件 + 插槽对象</td><td>直接挂 children（编译器已保证是函数袋）</td><td>SLOTS_CHILDREN</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么组件传函数要写成 () =&gt; ...</span><br>
+    传 <code class="inline">h(Child, null, someVNode)</code> 时，someVNode 在<b>父组件渲染时就创建了</b>；
+    传 <code class="inline">() =&gt; someVNode</code>（或对象形式插槽）则把创建推迟到<b>子组件渲染时</b>。
+    差别在：函数形式能拿到子组件的渲染上下文（作用域插槽的基础，第 22.4 节），
+    且父组件更新时可以复用同一个函数引用，减少子组件被误判「插槽变了」的无效更新 ——
+    编译器给槽对象打的 STABLE 标记（第 22 章）就是给这层优化用的。
+  </div>
+
+  <h2>16.6 createVNode 的预处理：children 规范化与属性合并</h2>
+  <p>
+    <code class="inline">h()</code> 不是简单 new 一个对象 —— 它在创建时就做两类重活。
+    理解它们，才能看懂模板编译产物里那些「奇怪的参数」：
+  </p>
+  <pre class="code" data-title="normalizeChildren 的四种形态（源码级简化）"><code>function normalizeChildren(vnode, children) {
+  if (typeof children === 'string' || typeof children === 'number') {
+    type = ShapeFlags.TEXT_CHILDREN;        // ① 文本孩子：setElementText 直写
+  } else if (Array.isArray(children)) {
+    type = ShapeFlags.ARRAY_CHILDREN;       // ② 数组孩子：走 diff
+  } else if (typeof children === 'object') {
+    if (children.default) type = ShapeFlags.SLOTS_CHILDREN;  // ③ 槽对象（22.4）
+  } else if (children === null) {
+    children = null;                        // ④ 清空
+  }
+}</code></pre>
+  <p>另一件重活是 <code class="inline">mergeProps</code> —— 父子组件传了同名 prop 怎么合：</p>
+  <table>
+    <tr><th>prop</th><th>合并策略</th><th>例子</th></tr>
+    <tr><td><code class="inline">class</code></td><td>拼接成数组</td><td>父传 a 子传 b → <code class="inline">"a b"</code></td></tr>
+    <tr><td><code class="inline">style</code></td><td>对象逐键合并（后者优先）/ 字符串拼接</td><td>父传颜色子传字号 → 都生效</td></tr>
+    <tr><td><code class="inline">onXxx</code></td><td>合并成<b>数组</b>，触发时依次调用</td><td>父透传 onClick + 自己绑 onClick → 两个都执行</td></tr>
+    <tr><td>其余</td><td>后者覆盖前者</td><td>同名 id 谁后传听谁的</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么在「创建时」做，而不是「patch 时」做？</span><br>
+    patch 每帧都跑，createVNode 一次只跑一次 —— 把类型判断、属性合并的成本<b>前移到创建</b>，
+    patch 就能拿到「已分好类」的 shapeFlag / children，直接按标记走快车道。
+    「创建时多干一点，运行时少算很多」是贯穿 Vue3 的时序哲学（对比 30 章的编译优化，同一个思路的编译期版本）。
+  </div>
+
+
+  <h2>16.7 ShapeFlag + PatchFlags：两面旗标的家谱总表</h2>
+  <p>全站散落讲过很多旗标，这里收拢成两张「密码本」—— 读官方源码时开着的两张表：</p>
+  <h3>ShapeFlag：这个 vnode 是什么 / 有什么</h3>
+  <table>
+    <tr><th>旗标</th><th>值</th><th>含义 · 消费点</th></tr>
+    <tr><td>ELEMENT</td><td>1</td><td>普通元素 → processElement（15 章）</td></tr>
+    <tr><td>FUNCTIONAL_COMPONENT</td><td>2</td><td>函数式组件 → 无实例直接调用（19.6）</td></tr>
+    <tr><td>STATEFUL_COMPONENT</td><td>4</td><td>状态组件 → mountComponent（19 章）</td></tr>
+    <tr><td>TEXT_CHILDREN / ARRAY_CHILDREN</td><td>8 / 16</td><td>children 形态 → patchChildren 分流（18.2）</td></tr>
+    <tr><td>SLOTS_CHILDREN</td><td>32</td><td>槽对象（22.4）</td></tr>
+    <tr><td>TELEPORT / SUSPENSE</td><td>64 / 128</td><td>内置组件分流（24.4 / 24.5）</td></tr>
+    <tr><td>COMPONENT_SHOULD_KEEP_ALIVE / KEPT_ALIVE</td><td>256 / 512</td><td>KeepAlive 缓存标记（24.3）</td></tr>
+    <tr><td>TEXT / COMMENT</td><td>1024 / 2048</td><td>文本 / 注释节点 → processText / processComment（25.2）</td></tr>
+    <tr><td>FRAGMENT</td><td>4096</td><td>多根节点 / v-for 的占位外壳 → processFragment（25.4）</td></tr>
+    <tr><td>MOVE / HIDDEN</td><td>8192 / 16384</td><td>可整体搬移（TransitionGroup / KeepAlive 复用）</td></tr>
+  </table>
+  <h3>PatchFlags：这个 vnode 的哪里可能变</h3>
+  <table>
+    <tr><th>旗标</th><th>值</th><th>含义 · 消费点</th></tr>
+    <tr><td>TEXT</td><td>1</td><td>动态文本 → 只更新 textContent</td></tr>
+    <tr><td>CLASS / STYLE</td><td>2 / 4</td><td>class / style 专属快道（15.7）</td></tr>
+    <tr><td>PROPS</td><td>8</td><td>有动态属性，配合 dynamicProps 数组（15.7 / 19.7）</td></tr>
+    <tr><td>FULL_PROPS</td><td>16</td><td>key 动态 / 属性来源复杂 → 全量 props 慢车道</td></tr>
+    <tr><td>HYDRATE_EVENTS</td><td>32</td><td>带事件监听，SSR 水合时要补挂（36 章）</td></tr>
+    <tr><td>STABLE / KEYED / UNKEYED_FRAGMENT</td><td>64 / 128 / 256</td><td>Fragment 子列表的三种 diff 策略（25.5 / 18 章）</td></tr>
+    <tr><td>NEED_PATCH</td><td>512</td><td>无具体 flag 但要进 patch（自定义指令 / ref 常伴生此位）</td></tr>
+    <tr><td>DYNAMIC_SLOTS</td><td>1024</td><td>动态插槽 → 组件必更（19.7 第一条短路）</td></tr>
+    <tr><td>HOISTED = -1 / BAIL = -2</td><td>特殊</td><td>静态免检通道（25.4）/ 放弃优化走全量</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 读法</span><br>
+    ShapeFlag 回答「我是谁」，PatchFlags 回答「我会变什么」。前者决定走哪条 process 分流，
+    后者决定 patch 内部走哪条车道 —— 两面旗合成一个数字，就是 Vue3「编译期换运行时」的全部载体。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：VNode</summary>
+    <div class="quiz-body">
+      <p>1. vnode.el 是什么时候被赋值的？为什么它对新旧 vnode 都重要？<br>
+         2. <code class="inline">ShapeFlags.ELEMENT | ShapeFlags.ARRAY_CHILDREN</code> 的十进制值是多少？（ELEMENT=1, ARRAY_CHILDREN=16）</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. mount 时（createElement 之后立刻回写）。patch 时旧 vnode.el 就是要打补丁的真实节点；新 vnode 挂载后也回写 el，替换完成后旧 vnode「让出」这个 DOM。<br>
+        2. 1 | 16 = 17。按位或等价于「两个标志位的并集」。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="hvnode">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#renderer"><span class="dir">上一章</span><span class="t">← 渲染器：分层的艺术</span></a>
+    <a class="next" href="#mount"><span class="dir">下一章</span><span class="t">mountElement：首挂载实战 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 17 mount ============ -->
+<section class="page" id="page-mount">
+  <div class="kicker">第 17 章 · 渲染器篇</div>
+  <h1>mountElement：首挂载实战</h1>
+  <p class="lead">
+    本章我们把 render 函数从 <code class="inline">console.log</code> 写成真正的渲染器：
+    递归地把 VNode 树翻译成真实 DOM。写完后你会突然明白 ——
+    <b>原来第 2 章的 effect 和第 17 章的 render，只差一层窗户纸。</b>
+  </p>
+
+  <h2>17.1 总路线图</h2>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox">render(vnode, container)</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">patch(null, vnode)</span>
+      <span class="farrow">→</span>
+      <span class="fbox">mountElement(vnode, container)</span>
+    </div>
+    <div class="cap">patch 是统一的入口：oldVNode 为 null 就是「挂载」，否则是「更新」（下一章）</div>
+  </div>
+
+  <h2>17.2 完整实现（可直接抄进 runtime-core/src/index.ts）</h2>
+  <pre class="code" data-title="runtime-core/src/index.ts · 第一版完整渲染器"><code>export function createRenderer(renderOptions) {
+  const {
+    insert: hostInsert, remove: hostRemove,
+    createElement: hostCreateElement,
+    setElementText: hostSetElementText,
+    setText: hostSetText,
+    parentNode: hostParentNode, nextSibling: hostNextSibling,
+    patchProp: hostPatchProp,
+  } = renderOptions;
+
+  /* ---------- 挂载一个元素 vnode ---------- */
+  function mountElement(vnode, container, anchor) {
+    // ① 把 el 回写进 vnode（第 16 章说的那座桥）
+    const el = (vnode.el = hostCreateElement(vnode.type));
+
+    // ② 上属性：遍历 props，分流给 patchProp（第 15 章的四分流）
+    for (const key in vnode.props) {
+      hostPatchProp(el, key, null, vnode.props[key]);
+    }
+
+    // ③ 挂 children：文本 / 数组 两条路（shapeFlag 决定）
+    if (typeof vnode.children === "string") {
+      hostSetElementText(el, vnode.children);
+    } else if (Array.isArray(vnode.children)) {
+      for (const child of vnode.children) {
+        // 数组 children：每个子节点递归 patch(null, child) 挂进来
+        patch(null, child, el, null);
+      }
+    }
+
+    // ④ 最后一步才把 el 插入文档（先在「内存里」组装好，一次进场）
+    hostInsert(el, container, anchor);
+  }
+
+  /* ---------- 卸载 ---------- */
+  function unmount(vnode) {
+    hostRemove(vnode.el);
+  }
+
+  /* ---------- 统一入口 ---------- */
+  function patch(oldVNode, vnode, container, anchor) {
+    if (oldVNode === vnode) return;          // 同一个对象引用，啥也不用干
+    if (oldVNode &amp;&amp; oldVNode.type !== vnode.type) {
+      // 类型都变了：旧树整个卸掉，走全新挂载
+      unmount(oldVNode);
+      oldVNode = null;
+    }
+    // 统一交给 processElement（预留组件分支的位置，第 19 章）
+    processElement(oldVNode, vnode, container, anchor);
+  }
+
+  function processElement(oldVNode, vnode, container, anchor) {
+    if (oldVNode == null) {
+      mountElement(vnode, container, anchor);   // 无旧 → 挂载
+    } else {
+      patchElement(oldVNode, vnode);            // 有旧 → 更新（下一章实现）
+    }
+  }
+
+  function render(vnode, container) {
+    if (vnode == null) {
+      // 传 null → 卸载整棵树（Vue3 卸载组件的官方姿势）
+      if (container._vnode) unmount(container._vnode);
+    } else {
+      patch(container._vnode || null, vnode, container, null);
+    }
+    container._vnode = vnode;   // container 记住当前树，下次更新 diff 用
+  }
+
+  return { render };
+}</code></pre>
+
+  <h3>四个细节，四个心意</h3>
+  <ul>
+    <li><b>「先组装后进场」</b>（④ 在 ③ 后面）：子树全部在游离 DOM 上构建完才 insert，避免布局引擎看到中间状态，减少无谓重排 —— 和装修完再搬家一个道理；</li>
+    <li><b><code class="inline">container._vnode</code></b>：渲染器把「上一次的树」记在容器身上。render 两次，自动获得 diff 能力 —— 状态就存在 DOM 节点上，很朴素；</li>
+    <li><b>anchor 参数一路透传</b>：为 diff 阶段「往中间插节点」预留的位置参数（insert 的第三个参数）；</li>
+    <li><b><code class="inline">oldVNode === vnode</code> 短路</b>：同一个 vnode 对象直接跳过 —— 第 30 章编译优化的静态提升就靠它白嫖。</li>
+  </ul>
+
+  <h2>17.3 🧪 mini 渲染器实验室</h2>
+  <p>
+    下面的实验室跑的就是上面这份代码（nodeOps 全部带日志探针）。
+    左侧点按钮驱动 render，右侧是<b>真实 DOM</b>（不是截图）+ 每一步底层操作的流水账。
+    注意看「更新」时操作数量的对比 —— 这就是 diff 的价值预告。
+  </p>
+
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 mini 渲染器实验室<span class="hint">真实 DOM · 操作全记录</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="mountSteps">
+        <button class="step-btn" data-mount="1">① 挂载待办清单</button>
+        <button class="step-btn" data-mount="2">② 更新标题文本</button>
+        <button class="step-btn" data-mount="3">③ 改样式 + 高亮模式</button>
+        <button class="step-btn" data-mount="4">④ 乱序重排列表（diff）</button>
+        <button class="step-btn" data-mount="5">⑤ 卸载整棵树</button>
+        <button class="step-btn" data-mount="reset">↺ 重置</button>
+      </div>
+      <div class="demo-grid wide-left">
+        <div class="demo-col">
+          <h4>🖥️ 真实 DOM（live）</h4>
+          <div id="mountPreview" style="border:1.5px dashed var(--border);border-radius:10px;min-height:170px;padding:14px;background:#fff"></div>
+        </div>
+        <div class="demo-col">
+          <h4>📜 底层操作流水账</h4>
+          <div class="console" id="mountConsole" style="height:250px"></div>
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat" id="mtCreate"><div class="v">0</div><div class="k">createElement</div></div>
+        <div class="stat" id="mtInsert"><div class="v">0</div><div class="k">insert</div></div>
+        <div class="stat" id="mtSet"><div class="v">0</div><div class="k">setX / patchProp</div></div>
+        <div class="stat" id="mtRemove"><div class="v">0</div><div class="k">remove</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--dim);margin-bottom:0" id="mountTip">
+        提示：①→② 只应出现 1 次 setElementText；④ 的乱序重排会复用 4 个节点、只新建 1 个。
+      </p>
+    </div>
+  </div>
+
+  <div class="callout deep">
+    <span class="tag">🧠 与响应式的合流预告</span><br>
+    现在的 render 是「手动挡」：得自己调用才有新 vnode。
+    只需再包一层：<code class="inline">effect(() =&gt; render(instance.render(), container))</code> ——
+    render 函数里读的所有响应式数据被自动收集，数据一变，整棵树自动重新 render + diff。
+    这一步正是第 19 章组件 mountComponent 的核心，全书两大系统将在那里正式会师。
+  </div>
+
+  
+  <h2>17.4 mountElement 的顺序为什么这么讲究</h2>
+  <p>官方 mountElement 的动作顺序是精心排过的，换一步都会出 bug —— 注意官方的顺序和 17.2
+    教学版恰好相反：<b>先子节点、后属性</b>：</p>
+  <pre class="code" data-title="官方顺序（带注释，renderer.ts）"><code>function mountElement(vnode, container, anchor) {
+  let el = (vnode.el = hostCreateElement(vnode.type));
+
+  // ① 先挂子节点（文本 or 数组）—— 官方注释原文：
+  //    "mount children first, since some props may rely on child content
+  //     being already rendered, e.g. &lt;select value&gt;"
+  if (shapeFlag &amp; TEXT_CHILDREN) hostSetElementText(el, children);
+  else if (shapeFlag &amp; ARRAY_CHILDREN) mountChildren(children, el, null);
+
+  // ② 再打属性
+  if (props) { for (const key in props) hostPatchProp(el, key, null, props[key]); }
+
+  // ③ 最后才插入容器 ⭐
+  hostInsert(el, container, anchor);
+
+  // ④ 指令 mounted / Transition appear（post 队列）
+  if (dirs) queuePostRenderEffect(() =&gt; dirs.mounted &amp;&amp; ..., anchor);
+}</code></pre>
+  <p>两个反直觉的顺序，各有原因：</p>
+  <ol>
+    <li><b>子节点先于属性</b>：某些属性的赋值依赖「子内容已经就位」。官方注释点名的案例是
+      <code class="inline">&lt;select value="x"&gt;</code> —— value 要在 option 挂上之后设置才会生效，
+      先设会被浏览器重置掉；</li>
+    <li><b>插入容器最后做</b>：整棵子树先在「游离 DOM」里组装完（17.2 的核心技巧），
+      一次性 insert —— 避免中间态闪屏，也让子节点的挂载钩子执行时看到的是完整家庭。</li>
+  </ol>
+  <div class="callout tip">
+    <span class="tag">💡 SVG 与命名空间</span><br>
+    createElement 还要处理 <code class="inline">svg</code> / <code class="inline">MathML</code> 命名空间：
+    官方用 <code class="inline">getNamespace()</code> 沿 vnode 树继承（<code class="inline">&lt;svg&gt;</code> 的子孙全是 svg 命名空间），
+    最终调 <code class="inline">document.createElementNS</code>。本项目教学版省掉了 ——
+    你画 SVG 图标库时如果元素不显示，先想想是不是命名空间丢了。
+  </div>
+
+  <h2>17.4 unmount：mount 的镜像，但多一件必做的事</h2>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">unmount(vnode)</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">beforeUnmount 钩子（pre 时机）</span>
+        <span class="farrow">→</span>
+        <span class="fbox">组件线：instance.scope.stop()（第 10 章！）</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">递归 unmount 所有 children</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">hostRemove(el)（Fragment 沿锚点删，第 25 章）</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">unmounted 钩子（post 队列）</span>
+      </div>
+    </div>
+    <div class="cap">顺序必须先深后浅：孩子全部拆完，最后才拆自己 —— 和 mount 正好相反</div>
+  </div>
+  <p>
+    为什么说「多一件必做的事」？mount 是纯粹的创建，unmount 却要<b>拆干净自己注册过的一切</b>：
+    渲染 effect（scope.stop）、指令钩子 unmounted、过渡的 leave 缓刑（第 27 章）、
+    Teleport 子树的目标清理（第 24 章）。
+    前端内存泄漏排查的第一站永远是「卸载链有没有走完」—— devtools 里能看到 detached DOM
+    还挂着事件监听，就是 unmount 链断了的铁证。
+  </p>
+
+<details class="quiz">
+    <summary>自测一下：挂载流程</summary>
+    <div class="quiz-body">
+      <p>1. 为什么 mountElement 里 insert 放最后，而不是先 insert 再加属性和子节点？<br>
+         2. <code class="inline">render(null, container)</code> 会发生什么？这个设计对应哪个官方 API？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 先进场再改装，浏览器会在每个中间状态上跑布局/绘制（用户还可能看到闪烁）；游离 DOM 上组装完一次进场，重排次数最少。React 16 之前批量 DOM 操作的原理同源。<br>
+        2. 卸载 container._vnode 指向的整棵树。对应 <code class="inline">unmount()</code> / <code class="inline">app.unmount()</code> 的底层。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="mount">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#hvnode"><span class="dir">上一章</span><span class="t">← h 与 VNode</span></a>
+    <a class="next" href="#diff"><span class="dir">下一章</span><span class="t">patch 与 diff：最长递增子序列 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 18 diff ============ -->
+<section class="page" id="page-diff">
+  <div class="kicker">第 18 章 · 渲染器篇</div>
+  <h1>patch 与 diff：最长递增子序列</h1>
+  <p class="lead">
+    渲染器的珠穆朗玛峰：当两组带 key 的子节点都变了，
+    如何用<b>最少的 DOM 移动</b>让旧列表变成新列表？Vue3 的答案是五步预处理 + 最长递增子序列（LIS）。
+    这是前端算法面试的天花板题，也是本章的全部内容。
+  </p>
+
+  <h2>18.1 patchElement：属性打补丁</h2>
+  <p>先热身。新旧 vnode 同类型时，不走推倒重来，而是「就地打补丁」：</p>
+  <pre class="code" data-title="patchElement（热身部分）"><code>function patchElement(oldVNode, vnode) {
+  const el = (vnode.el = oldVNode.el);   // ⭐ 复用旧 DOM！这一行就是「不推倒重来」
+
+  // ① 属性 diff：新旧 props 的键取并集，逐键比较
+  const oldProps = oldVNode.props || {};
+  const newProps = vnode.props || {};
+  for (const key in newProps) {
+    if (newProps[key] !== oldProps[key]) {          // 变了的才动
+      hostPatchProp(el, key, oldProps[key], newProps[key]);
+    }
+  }
+  for (const key in oldProps) {
+    if (!(key in newProps)) {                        // 新里没有 → 删属性
+      hostPatchProp(el, key, oldProps[key], null);
+    }
+  }
+
+  // ② children diff：本章主角
+  patchChildren(oldVNode, vnode, el);
+}</code></pre>
+  <p>属性 diff 的哲学和第 6 章依赖清理、第 15 章 patchStyle 完全同构：<b>新来的应用，过期的清除，没变的不碰。</b></p>
+
+  <h2>18.2 patchChildren 的分诊台</h2>
+  <pre class="code" data-title="children 的组合分诊"><code>function patchChildren(oldVNode, vnode, el) {
+  const oldCh = oldVNode.children, newCh = vnode.children;
+
+  if (typeof newCh === "string") {
+    // 新是文本：旧的不管是啥，整体覆盖（数组的话先逐个卸载）
+    if (Array.isArray(oldCh)) oldCh.forEach(c => unmount(c));
+    if (oldCh !== newCh) hostSetElementText(el, newCh);
+  } else if (Array.isArray(newCh)) {
+    if (Array.isArray(oldCh)) {
+      patchKeyedChildren(oldCh, newCh, el);   // ⭐ 双数组：进入主战场
+    } else {
+      hostSetElementText(el, "");             // 旧文本 → 清空再挂新数组
+      newCh.forEach(c => patch(null, c, el, null));
+    }
+  } else {
+    // 新 children 为空：旧的清光
+    if (Array.isArray(oldCh)) oldCh.forEach(c => unmount(c));
+    else hostSetElementText(el, "");
+  }
+}</code></pre>
+
+  <h2>18.3 主战场：五步预处理 + LIS</h2>
+  <p>patchKeyedChildren 是 Vue3 渲染器最复杂的 100 行。先别被吓到 —— 用一个生活场景把整套算法「翻译」一遍：</p>
+
+  <div class="callout tip">
+    <span class="tag">🎨 一分钟比喻：全班换座位</span><br>
+    期末换座位，旧座位表要换成新座位表，你是班主任。最省力的策略：<br>
+    ① <b>先扫两头</b>：第一排和最后一排很多人压根没换 —— 这些人「白捡」，打声招呼（patch 内容）就行，不用搬桌子；<br>
+    ② <b>剩下的中间区</b>才真的乱了。给每人发一本「通讯录」（key 映射表），按名字 O(1) 查到新座位；<br>
+    ③ 通讯录里查无此人 = 转学生（新挂载）；旧表里有、新表里没有 = 转学了（卸载）；<br>
+    ④ 灵魂问题是「<b>最少搬几个人？</b>」—— 找出<b>相对顺序没变</b>的最长一队人，让他们坐住不动（LIS），其他人对着这队人挪。
+    <b>「最长递增子序列」的全部直觉就一句话：不动的人越多，要搬的人越少。</b>
+  </div>
+  <p>
+    而且这套算法很懂「见好就收」：头尾预处理之后，<b>大量日常场景根本走不到 LIS</b> ——
+    尾部追加、头部插入、纯删除，都在中间几步直接收工。LIS 只属于真正的「乱序混合战」。
+    下面先把每一格推演清楚，再到 18.4 的分步实验室亲手走一遍。
+  </p>
+
+  <h3>第一步：从头同步（sync from start）</h3>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox gray">a</span><span class="fbox gray">b</span>
+      <span class="fbox">c</span><span class="farrow">← 停！</span>
+      <span style="font-size:15.5px;color:var(--dim)">前面 key 相同的逐个 patch（打补丁不移动），到 c 停下</span>
+    </div>
+  </div>
+  <h3>第二步：从尾同步（sync from end）</h3>
+  <div class="diagram">
+    <div class="flow">
+      <span style="font-size:15.5px;color:var(--dim)">尾部 key 相同的也逐个 patch → </span>
+      <span class="farrow">停！→</span>
+      <span class="fbox">d</span><span class="fbox gray">e</span><span class="fbox gray">f</span>
+    </div>
+  </div>
+  <p>头尾两次「白捡」之后，剩下中间一段真正乱序的。若一方已耗尽，直接批量挂载/卸载收工（第三步，略）。</p>
+
+  <h3>第四步：乱序段 —— key 映射表</h3>
+  <pre class="code" data-title="中间乱序段的处理（核心）"><code>// 给新节点建索引表：key → 在新列表中的下标
+const keyToNewIndex = new Map();
+for (let j = s2; j &lt;= e2; j++) keyToNewIndex.set(newCh[j].key, j);
+
+// 遍历旧乱序段：在表里找得到 → 复用；找不到 → 卸载
+const toBePatched = e2 - s2 + 1;
+const newIndexToOldIndex = new Array(toBePatched).fill(-1);  // ⭐ 核心数组
+let moved = false, maxNewIndexSoFar = 0;
+
+for (let i = s1; i &lt;= e1; i++) {
+  const newIndex = keyToNewIndex.get(oldCh[i].key);
+  if (newIndex === undefined) {
+    unmount(oldCh[i]);                        // 新列表没有我 → 卸载
+  } else {
+    newIndexToOldIndex[newIndex - s2] = i;    // 记下「新位置的旧主人」
+    if (newIndex &lt; maxNewIndexSoFar) moved = true;  // 顺序倒退了 → 需要移动
+    else maxNewIndexSoFar = newIndex;
+  }
+}</code></pre>
+  <p>
+    <code class="inline">newIndexToOldIndex</code> 是整个算法的枢纽：下标 = 新位置，值 = 这个位置的旧节点是谁。
+    -1 表示这个新位置没有旧主人（要新建）。官方实现里它初始化为 0、存的值是「旧下标 + 1」——
+    这样 0 就代表「新挂载」，教学版改用 -1 更直观，思想一致。
+  </p>
+
+  <h3>第五步：LIS —— 能不动就不动</h3>
+  <p>
+    如果 moved = true，问题变成：newIndexToOldIndex 里哪些节点<b>保持相对顺序不变</b>（不用动），剩下的才需要移动？
+    这正是<b>最长递增子序列</b>（Longest Increasing Subsequence）的定义。LIS 里的节点原地不动，其余的用 insert 挪到位 —— 数学保证这就是最少移动方案。
+  </p>
+  <pre class="code" data-title="LIS 的贪心 + 二分解法（教学注释版）"><code>// 目标：返回最长递增子序列的「下标集合」（注意：是下标，不是值！）
+function getSequence(arr) {
+  const result = [0];            // result 存下标；对应值单调递增
+  for (let i = 1; i &lt; arr.length; i++) {
+    if (arr[i] === -1) continue;              // -1 = 新挂载位置，跳过
+    const last = arr[result[result.length - 1]];
+    if (arr[i] &gt; last) {
+      result.push(i);                         // 比尾巴大 → 直接接上（LIS 变长）
+    } else {
+      // 二分找到 result 中第一个 ≥ arr[i] 的位置，替换之（给后面留「更低的台阶」）
+      let lo = 0, hi = result.length - 1;
+      while (lo &lt; hi) {
+        const mid = (lo + hi) >> 1;
+        if (arr[result[mid]] &lt; arr[i]) lo = mid + 1;
+        else hi = mid;
+      }
+      result[lo] = i;
+    }
+  }
+  return result;   // 这些下标对应的节点 → 原地不动
+}
+
+// 最后一步：从后往前遍历新列表（从后往前是为了算 insert 的 anchor）
+let lisIndex = result.length - 1;
+for (let j = toBePatched - 1; j &gt;= 0; j--) {
+  const oldIndex = newIndexToOldIndex[j];
+  if (oldIndex === -1) {
+    patch(null, newCh[s2 + j], el, anchor);    // 没有旧主人 → 新建
+  } else {
+    if (lisIndex &lt; 0 || j !== result[lisIndex]) {
+      hostInsert(newCh[s2 + j].el, el, anchor); // 不在 LIS 里 → 挪我
+    } else {
+      lisIndex--;                                // 在 LIS 里 → 纯 patch，不挪
+    }
+  }
+  anchor = newCh[s2 + j].el;                    // 锚点随行
+}</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 LIS 为什么「从后往前」遍历？</span><br>
+    insert(el, container, anchor) 的语义是「插到 anchor 前面」。从后往前处理时，anchor 永远指向「已经处理好的下一个位置」，
+    每个节点挪到 anchor 前就自动落位。从前往后的话 anchor 语义会打架。这个方向选择是理解 diff 实现的钥匙之一。
+  </div>
+  <div class="callout warn">
+    <span class="tag">⚠️ 官方的 getSequence 比上面多一步「回溯」</span><br>
+    贪心 + 二分的裸 result 有个隐患：中间发生过「替换」的话，result 里留下的下标可能不再互为递增
+    （替换是为了给后面留更低的台阶，但被换下来的下标没清出去）。官方实现额外维护一个
+    <b>前驱数组 p</b>：每次替换时记下「我踩在谁头上」，最后从尾部沿 p 回溯出真正合法的 LIS。
+    完整版见 renderer.ts 的 getSequence —— 面试手撕 LIS 时，写出 p 数组回溯就是超越 90% 候选人的细节。
+  </div>
+
+  
+  <h3>逐格推演：旧 [a,b,c,d,e] → 新 [a,d,c,b,f,e]</h3>
+  <p>固定一个「五脏俱全」的例子 —— 有头同步、有尾同步、有乱序、有新增，跟着表走一遍：</p>
+  <table>
+    <tr><th>步</th><th>动作</th><th>状态变化</th></tr>
+    <tr><td>① 头同步</td><td>旧[0]=a vs 新[0]=a → 同类型同 key → patchElement（只更新内容，不挪位置）</td><td>a ✅ 处理完，i → 1</td></tr>
+    <tr><td>② 尾同步</td><td>旧[4]=e vs 新[5]=e → patch e；指针内收；再比 旧[3]=d vs 新[4]=f → 对不上，停</td><td>e ✅ 处理完，i=1 / e1=3 / e2=4</td></tr>
+    <tr><td>③ 判定</td><td>双方都有剩余 → 进入乱序主战场</td><td>旧剩 [b,c,d]，新剩 [d,c,b,f]</td></tr>
+    <tr><td>④ 建通讯录</td><td>keyToNewIndexMap = { d:1, c:2, b:3, f:4 }</td><td>按 key 查新位置 O(1)</td></tr>
+    <tr><td>⑤ 扫旧建表</td><td>b→新3（maxSoFar=3）；c→新2，2 &lt; 3 顺序倒退 → <b>moved=true</b>；d→新1；f 查无此人 → 新建</td><td>newIndexToOldIndex = [3, 2, 1, -1]</td></tr>
+    <tr><td>⑥ 求 LIS</td><td>在 [3,2,1,-1] 上求最长递增子序列（-1 跳过）→ 只保住下标 2，对应旧下标 1 = <b>b</b></td><td>LIS = [b]，其余都要动</td></tr>
+    <tr><td>⑦ 从后往前落位</td><td>f 新建（插到 e 前）→ b 在 LIS 不动 → c 挪到 b 前 → d 挪到 c 前</td><td>最终 a,d,c,b,f,e ✅</td></tr>
+  </table>
+  <p>
+    总账：<b>0 卸载 · 1 新建 · 2 次移动 · 3 次原地 patch</b> —— 五个旧节点一个都没销毁重建。
+    若走「全删重建」要 5 卸 + 6 挂 = 11 次 DOM 操作，还丢光全部状态。省下的 9 次操作，就是这套算法的全部意义。
+  </p>
+
+  <h2>18.4 🧪 分步推演实验室：亲手走一遍</h2>
+  <p>
+    纸上推演是「知道」，这里是「做到」—— <b>点一下走一步</b>，亲眼看三个指针（i / e1 / e2）怎么移动、
+    通讯录和对照表怎么长出来、LIS 怎么把 b 保住、最后怎么从后往前逐个落位。
+  </p>
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 diff 分步推演实验室<span class="hint">旧 [a,b,c,d,e] → 新 [a,d,c,b,f,e] · 每步可暂停</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="dwSteps">
+        <button class="step-btn" data-dw="next">▶ 下一步</button>
+        <button class="step-btn" data-dw="auto">⏩ 自动播放</button>
+        <button class="step-btn" data-dw="reset">↺ 重置</button>
+      </div>
+      <div class="diffrow" id="dwOldRow"></div>
+      <div class="diffrow" id="dwNewRow"></div>
+      <div class="dw-panel" id="dwState"></div>
+      <div class="demo-grid wide-left">
+        <div class="demo-col">
+          <h4>📜 分步解说</h4>
+          <div class="console" id="dwConsole" style="height:250px"></div>
+        </div>
+        <div class="demo-col">
+          <h4>🧮 算法中间产物</h4>
+          <div class="dw-panel" id="dwData"></div>
+          <div class="stat-grid" style="margin-top:10px">
+            <div class="stat" id="dwStep"><div class="v">0 / 8</div><div class="k">推演进度</div></div>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:14px;color:var(--dim);margin-bottom:0" id="dwTip">
+        提示：连点「下一步」，每一步只做一件事 —— 看懂一步，再走下一步。
+      </p>
+    </div>
+  </div>
+
+  <h2>18.5 🧪 diff 快速实验室</h2>
+  <p>
+    选一个场景（或自定义 key 序列），看算法五步如何拆解：绿色 = 原地不动（LIS 保护），
+    蓝色 = 移动复用，橙色 = 新建，红色删除线 = 卸载。
+  </p>
+
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 Keyed Diff 实验室<span class="hint">五步算法可视化</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="diffScenarios">
+        <button class="step-btn" data-diff="a,b,c|a,b,c,d,e">尾部追加</button>
+        <button class="step-btn" data-diff="b,c,d|a,b,c,d">头部插入</button>
+        <button class="step-btn" data-diff="a,b,c,d,e|a,c,e">中间删除</button>
+        <button class="step-btn" data-diff="a,b,c,d,e|c,a,d,b,e">乱序复用</button>
+        <button class="step-btn" data-diff="a,b,c|c,b,a">全员倒序（最坏情况）</button>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
+        <label style="font-size:15.5px;color:var(--dim)">自定义（旧→新，逗号分隔）：</label>
+        <input id="diffOld" value="a,b,c,d" style="font-family:var(--mono);font-size:13px;padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;width:130px">
+        <span style="color:var(--dim)">→</span>
+        <input id="diffNew" value="d,a,b,c" style="font-family:var(--mono);font-size:13px;padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;width:130px">
+        <button class="step-btn" id="diffRun">运行 diff</button>
+      </div>
+      <div id="diffVisual" style="margin-bottom:14px"></div>
+      <div class="console" id="diffConsole" style="height:220px"></div>
+      <div class="stat-grid">
+        <div class="stat" id="dfStay"><div class="v">0</div><div class="k">原地不动（patch）</div></div>
+        <div class="stat" id="dfMove"><div class="v">0</div><div class="k">移动（insert）</div></div>
+        <div class="stat" id="dfMount"><div class="v">0</div><div class="k">新建（mount）</div></div>
+        <div class="stat" id="dfUn"><div class="v">0</div><div class="k">卸载（unmount）</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <span class="tag">⚠️ 为什么不许用 index 当 key？</span><br>
+    index 是「位置编号」而不是「身份」。头部插入一项后所有 index 平移 —— 旧节点 a（原 index 0）会被误认为新节点 a（现 index 1）的身份完全错位，
+    diff 退化成大面积错误复用 + 移动；带输入框的列表还会出现「内容串行」的经典 bug。
+    <b>key 的本质是「身份证号」，不是「座位号」。</b>
+  </div>
+
+  
+  <h2>18.6 两个经典追问：为什么从后往前插？为什么不用双端 diff？</h2>
+  <p><b>追问一：第 18.3 节最后为什么要「从后往前」遍历 toBePatched？</b></p>
+  <pre class="code" data-title="从后往前的 anchor 逻辑"><code>for (let i = toBePatched - 1; i &gt;= 0; i--) {
+  const nextIndex = s2 + i;
+  const anchor = nextIndex + 1 &lt; newChildren.length
+    ? newChildren[nextIndex + 1].el    // 我的锚 = 新列表里「下一个兄弟」
+    : parentAnchor;                     // 我是最后一个 → 锚是父锚
+  if (newIndexToOldIndexMap[i] === -1) {
+    patch(null, newChildren[nextIndex], container, anchor);  // 新建
+  } else if (moved) {
+    hostInsert(nextChild.el, container, anchor);              // 移动
+  }
+}
+// 从后往前 → 处理到 i 时，i+1 已经在正确位置 → anchor 永远是对的</code></pre>
+  <p>
+    如果从前往后：每移动一个节点，后面所有节点的「下一个兄弟」都可能变，anchor 要重算。
+    从后往前，<b>已处理的区间永远是对的</b>，anchor 一路继承 —— 又是「不变量优先」的思路。
+  </p>
+  <p><b>追问二：Vue2 的双端 diff 挺好，为什么 Vue3 换了？</b></p>
+  <table>
+    <tr><th>方案</th><th>思路</th><th>最坏复杂度</th><th>致命弱点</th></tr>
+    <tr><td>Vue2 双端</td><td>头尾四指针互夹</td><td>O(n)</td><td>乱序区仍要逐个找、逐个挪；四指针之外的节点要走遍历查找</td></tr>
+    <tr><td>Vue3 预处理 + LIS</td><td>先头尾同步，中间乱序区求「最多不动」</td><td>O(n log n)</td><td>依赖 key（没 key 走退化路径，见下）</td></tr>
+  </table>
+  <p>
+    决定性因素其实是<b>编译器的配合</b>：Vue3 模板编译后每个动态子节点带 patchFlag + key 信息，
+    中间乱序段可以直接用 key 映射表 O(1) 定位，再配 LIS 把「必须动」的压到最少 ——
+    双端 diff 在纯运行时设计里很优，但<u>它浪费了编译期已知的情报</u>。
+    这是「编译反哺运行时」在 diff 算法选择上的直接体现（第 30 章）。
+  </p>
+  <div class="callout warn">
+    <span class="tag">⚠️ 无 key 的退化路径</span><br>
+    <code class="inline">v-for</code> 不给 key 时走 <b>patchUnkeyedChildren</b>：纯粹按下标对齐，
+    下标相同就地 patch，多退少补 —— 没有移动判断，但内容错位（第 25.5 节源码）。
+    「为什么不能用 index 当 key」的本质：index 对齐在<b>删除中间项</b>时会把「内容」错配给
+    「身份」，状态（输入框内容、勾选）全部串位 —— 不是 diff 慢，是身份错了。
+  </div>
+
+  <h2>18.7 从「够用」到「最优」：三种 diff 策略的账本</h2>
+  <p>同样把 <code class="inline">[a,b,c,d,e]</code> 变成 <code class="inline">[e,d,a,b,c]</code>（纯逆序），三种策略的 DOM 操作账单：</p>
+  <table>
+    <tr><th>策略</th><th>做法</th><th>本例 DOM 操作</th><th>复杂度</th></tr>
+    <tr><td>全删重建</td><td>卸载全部旧的，挂载全部新的</td><td>5 卸 + 5 挂 = 10 次，状态全丢</td><td>O(n) 但重建成本巨大</td></tr>
+    <tr><td>逐个挪位</td><td>每个 key 比对后 insertBefore 挪到正确位置</td><td>最多 n 次移动</td><td>移动次数不保证最少</td></tr>
+    <tr><td><b>预处理 + LIS（Vue）</b></td><td>先同步头尾，剩余乱序段求 LIS，只动 LIS 之外的</td><td>2 次移动（LIS 保住 a、b、c 原地不动，只挪 e、d）</td><td>移动次数<b>数学上最少</b></td></tr>
+  </table>
+  <pre class="code" data-title="官方 patchKeyedChildren 的五步（变量名对照）"><code>// ① 头头同步：while (i &lt;= e1 &amp;&amp; i &lt;= e2 &amp;&amp; isSameVNodeType(n1, n2)) patch
+// ② 尾尾同步：while (i &lt;= e1 &amp;&amp; i &lt;= e2 &amp;&amp; ...) patch（用 e1-- / e2--）
+// ③ 旧尽新余：i &gt; e1 → mountChildren(新多出来的)     —— 纯新增场景免 diff
+// ④ 新尽旧余：i &gt; e2 → unmount(旧多出来的)           —— 纯删除场景免 diff
+// ⑤ 乱序主战场：
+//    keyToNewIndexMap = new Map(newChildren 的 key → 下标)     ← O(n) 建 Map
+//    newIndexToOldIndexMap：新孩子各自的老下标（-1 = 新挂载）
+//    increasingNewIndexSequence = getSequence(上表)            ← LIS（18 章实验室同款）
+//    从后往前遍历新孩子：LIS 成员不动，其余 move / mount
+// ⭐ 从后往前的原因：anchor 天然正确 —— 插入永远发生在「右边已经排好的兄弟」之前</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 Vue vs React 的 diff 分歧点</span><br>
+    React 也做头尾之外的 key 映射，但<b>放弃求最优移动</b>：按新顺序从左到右逐个处理，
+    顺序不对就 move —— 简单、可预测，代价是逆序场景移动次数多。
+    Vue 愿意花 O(n log n) 算 LIS 换「最小 DOM 操作」。
+    没有对错，只有取舍：React 赌「列表顺序变动少」，Vue 把宝押在运行时优化上。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：diff 算法</summary>
+    <div class="quiz-body">
+      <p>1. old [a,b,c] → new [a,b,c,d,e] 走到 LIS 吗？总共几次 DOM 操作？<br>
+         2. LIS 保护「不动节点」时，patch（属性补丁）还执行吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 走不到。头同步吃掉 a,b,c，旧列表耗尽 → 第三步批量挂载 d,e。DOM 操作 = 2 次 mount + 2 次 insert，零移动 —— 预处理的省钱威力。<br>
+         2. 执行。LIS 只免除「位置移动」，新旧节点仍要 patchElement diff 属性/子节点 —— 不动 ≠ 不更新。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="diff">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#mount"><span class="dir">上一章</span><span class="t">← mountElement：首挂载实战</span></a>
+    <a class="next" href="#component"><span class="dir">下一章</span><span class="t">组件化：响应式 × 渲染器合流 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 19 component ============ -->
+<section class="page" id="page-component">
+  <div class="kicker">第 19 章 · 渲染器篇</div>
+  <h1>组件化：响应式 × 渲染器合流</h1>
+  <p class="lead">
+    全书高潮。当 vnode.type 从字符串变成「组件对象」，两大系统正式会师：
+    组件的渲染函数被包进 effect，从此<b>数据变了，界面自动重渲染</b> ——
+    你日常写的每一个 .vue 文件，底层都是这一章的代码。
+  </p>
+
+  <h2>19.1 组件 vnode：type 是个对象</h2>
+  <pre class="code" data-title="组件与元素的区别只在一处"><code>// 元素 vnode：type 是字符串
+h("div", { class: "box" }, "hi");
+
+// 组件 vnode：type 是对象（或 setup 函数）
+const Counter = {
+  props: ["count"],
+  setup(props) { /* ... */ },
+  render() { return h("div", null, `count is ${this.count}`); },
+};
+h(Counter, { count: 1 });   // ← type = 组件对象</code></pre>
+  <p>所以 patch 只需在入口加一个分流：</p>
+  <pre class="code" data-title="patch 分流（补完第 17 章）"><code>function patch(oldVNode, vnode, container, anchor) {
+  if (oldVNode === vnode) return;
+  if (oldVNode &amp;&amp; oldVNode.type !== vnode.type) { unmount(oldVNode); oldVNode = null; }
+
+  if (typeof vnode.type === "string") {
+    processElement(oldVNode, vnode, container, anchor);   // 元素线（第 17 章）
+  } else {
+    processComponent(oldVNode, vnode, container, anchor); // ⭐ 组件线（本章）
+  }
+}</code></pre>
+
+  <h2>19.2 mountComponent：三步走</h2>
+  <pre class="code" data-title="mountComponent（教学完整版）"><code>function mountComponent(oldVNode, vnode, container, anchor) {
+  // ① 创建组件实例：一个装所有运行时状态的「档案袋」
+  const instance = (vnode.component = {
+    vnode, props: {}, slots: null, subTree: null,   // subTree = 组件渲染出的元素树
+    isMounted: false, next: null,                    // next = 待更新的新 vnode
+  });
+
+  // ② 初始化 props + 调用 setup（你写的组合式 API 在这里执行！）
+  instance.props = vnode.props;
+  const setupResult = vnode.type.setup?.(instance.props);
+  if (typeof setupResult === "function") {
+    instance.render = setupResult;      // setup 返回函数 → 就是 render
+  } else {
+    instance.setupState = proxyRefs(setupResult);  // 返回对象 → 第 7 章的自动脱 .value！
+    instance.render = vnode.type.render;
+  }
+
+  // ③ 建立响应式渲染：⭐⭐ 全书最重要的一次 effect 包装 ⭐⭐
+  setupRenderEffect(instance, container, anchor);
+}
+
+function setupRenderEffect(instance, container, anchor) {
+  instance.update = effect(function componentUpdateFn() {
+    if (!instance.isMounted) {
+      // 首挂载：跑 render 拿到元素子树，递归挂载
+      const subTree = instance.render();
+      patch(null, subTree, container, anchor);
+      instance.subTree = subTree;
+      instance.isMounted = true;
+    } else {
+      // 更新：重跑 render 拿新子树，与旧 subTree 做 patch（第 18 章 diff 上场）
+      const nextTree = instance.render();
+      const prevTree = instance.subTree;
+      patch(prevTree, nextTree, container, anchor);
+      instance.subTree = nextTree;
+    }
+  });
+}</code></pre>
+  <p>请把 <b>③</b> 读三遍。所有魔法在这里闭环：</p>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox blue">render() 读响应式数据</span>
+      <span class="farrow">→</span>
+      <span class="fbox">track 收集依赖</span>
+    </div>
+    <div class="flow" style="margin-top:10px">
+      <span class="fbox rose">数据变化 trigger</span>
+      <span class="farrow">→</span>
+      <span class="fbox">update（effect）重跑</span>
+      <span class="farrow">→</span>
+      <span class="fbox">新旧 subTree diff</span>
+      <span class="farrow">→</span>
+      <span class="fbox">最小化更新 DOM</span>
+    </div>
+    <div class="cap">第 2 章的 effect + 第 18 章的 diff = 「数据驱动视图」的完整闭环</div>
+  </div>
+
+  <h2>19.3 父组件更新，子组件怎么办？</h2>
+  <p>
+    父组件重渲染时，子组件 vnode 也会重建。但子组件<b>不一定要重渲染</b> ——
+    Vue 的组件更新是有「资格审查」的（shouldUpdateComponent）：
+  </p>
+  <pre class="code" data-title="组件更新的资格审查（思想版）"><code>function updateComponent(oldVNode, newVNode) {
+  newVNode.component = oldVNode.component;   // ⭐ 复用整个实例（组件的「身份」不变）
+
+  if (shouldUpdateComponent(oldVNode, newVNode)) {
+    newVNode.component.next = newVNode;      // 待更新 vnode 挂到 next 上（异步排队）
+    newVNode.component.update();             // 手动触发一次渲染 effect
+  } else {
+    // props 没变（浅比较 + hasChanged）：直接吃掉新 vnode，跳过重渲染
+    newVNode.component.vnode = newVNode;
+  }
+}
+
+// shouldUpdateComponent 的粗略逻辑：
+//   - 新旧 props 里有任何一个键的值变了（Object.is 比较）→ true
+//   - 子组件还有 slots/emits 依赖 → 保守起见 true</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 这就是「组件级缓存」的第一道防线</span><br>
+    props 没变就跳过整棵子树的重渲染 —— 比 memo 手动优化更早、更自动。
+    配合第 30 章编译器的 patchFlag（精确知道哪些 props 可能变），这道闸门效率极高。
+    Vue 里 v-memo、React 里 memo + 浅比较，本质都在做同一件事：<b>身份没变就别动</b>。
+  </div>
+
+  <h2>19.4 生命周期：注册即挂榜</h2>
+  <p>
+    onMounted 等钩子的原理朴素得可爱：<b>往当前组件实例的钩子数组里 push 回调</b>，时机到了挨个调用。
+    关键又是那个熟悉的全局指针模式：
+  </p>
+  <pre class="code" data-title="生命周期原理（教学版）"><code>let currentInstance = null;          // 第三次见到这个模式了！（activeEffect、activeScope）
+
+function onMounted(fn) {
+  if (currentInstance) {             // 必须在 setup 同步执行期间调用！
+    currentInstance.mounted.push(fn);
+  } else {
+    warn("onMounted 只能在 setup 中调用");
+  }
+}
+
+function setupComponent(instance) {
+  const last = currentInstance;      // 暂存（第 10 章的老配方）
+  currentInstance = instance;
+  try {
+    instance.render = instance.type.setup(instance.props) || ...;
+  } finally {
+    currentInstance = last;          // 还原 —— 所以异步回调里调 onMounted 会丢
+  }
+}
+
+function mountComponent(instance) {
+  /* ...挂载完成后... */
+  instance.mounted.forEach(fn => fn());   // 挨个执行（源码里叫 invokeArrayFns）
+}</code></pre>
+  <div class="callout warn">
+    <span class="tag">⚠️ 为什么 async setup 里不能裸调 onMounted？</span><br>
+    setup 一旦 await，执行权就交出去了 —— 后续代码运行时 currentInstance 早已还原成 null，钩子注册失败。
+    所以 Vue 提供 <code class="inline">onActivated/onDeactivated</code> 之外还有 Suspense 的特殊处理，
+    而普通项目里的忠告是：<b>生命周期注册必须在 setup 的同步阶段完成</b>。原理现在你懂了：不是规则霸道，是指针回家了。
+  </div>
+
+  <h2>19.5 更新调度：effect 的 scheduler 第二春</h2>
+  <p>
+    真实 Vue 里 <code class="inline">instance.update</code> 的 scheduler 不是立刻执行，而是
+    <code class="inline">queueJob</code> —— 推进一个去重队列，微任务里统一 flush。
+    为什么？一个事件里改 3 个数据，trigger 3 次 update，但 patch 只需要<b>最后</b>一次：
+  </p>
+  <pre class="code" data-title="批量异步更新的思想（真实源码简化）"><code>const queue = new Set();          // Set 天然去重：同一组件的 update 只留一份
+let isFlushing = false;
+
+function queueJob(job) {
+  queue.add(job);                 // 只排队，不执行
+  if (!isFlushing) {
+    isFlushing = true;
+    Promise.resolve().then(flushJobs);   // 微任务：等本轮同步代码全跑完
+  }
+}
+
+function flushJobs() {
+  queue.forEach(job => job());    // 此刻数据已是最终态，每个组件只 patch 一次
+  queue.clear(); isFlushing = false;
+}</code></pre>
+  <p>第 5 章 scheduler 的种子（「数据变了不直接跑，先问调度器」）至此完全开花结果。不过这只是骨架 —— <b>第 23 章会把它补齐到生产级</b>：按 id 排序保证父先子后、pre/post 两支插队队伍，以及 nextTick 的真身。</p>
+
+  
+  <h2>19.6 this 的真身：PublicInstanceProxyHandlers 的查找顺序</h2>
+  <p>
+    你在模板里写 <code class="inline">{{ count }}</code>、在 options API 里写
+    <code class="inline">this.count</code> —— 这些访问背后是一层「渲染代理」，
+    它按固定顺序在实例的各个口袋里找值：
+  </p>
+  <pre class="code" data-title="PublicInstanceProxyHandlers（官方 componentPublicInstance.ts，简化）"><code>const PublicInstanceProxyHandlers = {
+  get({ _: instance }, key) {
+    const { ctx, setupState, data, props, accessCache } = instance;
+    // ⭐ accessCache：第一次查找的结果缓存成编号，之后 O(1) 直达
+    let normalizedProps;
+    if (key[0] !== '$') {
+      // ⭐ accessCache：首次查找的结果缓存成编号（空间换时间）。
+      //    官方 AccessTypes：SETUP=1 / DATA=2 / PROPS=3 / CONTEXT=4；教学版压缩成 0~3，顺序一致
+      const n = accessCache[key];
+      if (n !== undefined) {
+        if (n === 0) return setupState[key];
+        else if (n === 1) return data[key];
+        else if (n === 3) return ctx[key];
+        else if (n === 2) return props[key];
+      } else if (hasSetupBinding(setupState, key)) {
+        accessCache[key] = 0;
+        return setupState[key];                  // ① setup 返回的绑定（script setup 最快路径）
+      } else if (data !== EMPTY_OBJ && hasOwn(data, key)) {
+        accessCache[key] = 1;
+        return data[key];                        // ② data
+      } else if (
+        (normalizedProps = instance.propsOptions[0]) &&
+        hasOwn(normalizedProps, key)
+      ) {
+        accessCache[key] = 2;
+        return props[key];                       // ③ props
+      } else if (hasOwn(ctx, key)) {
+        accessCache[key] = 3;
+        return ctx[key];                         // ④ ctx：方法 / computed / $ 开头的内置属性
+      }
+    }
+  },
+  has({ _: { data, setupState, ctx, propsOptions, appContext } }, key) {
+    let normalizedProps;
+    return (
+      key !== '!' && !(
+        (key[0] !== '$' &&
+          (hasSetupBinding(setupState, key) ||
+            (data !== EMPTY_OBJ && hasOwn(data, key)) ||
+            (normalizedProps = propsOptions[0]) && hasOwn(normalizedProps, key) ||
+            hasOwn(ctx, key))) ||
+        hasOwn(appContext.config.globalProperties, key)
+      )
+    );
+  },
+  set({ _: instance }, key, value) {
+    const { data, setupState, ctx } = instance;
+    if (hasSetupBinding(setupState, key)) {
+      setupState[key] = value;                   // 改 setup 绑定 → 触发响应式（第 3 章）
+      return true;
+    } else if (setupState.__isScriptSetup && hasOwn(setupState, key)) {
+      warn('Cannot mutate &lt;script setup&gt; binding from outside.');
+      return false;                              // ⭐ script setup 的绑定从外部只读
+    } else if (data !== EMPTY_OBJ && hasOwn(data, key)) {
+      data[key] = value;
+      return true;
+    } else if (hasOwn(instance.props, key)) {
+      warn('Attempting to mutate prop "' + key + '". Props are readonly.');
+      return false;                              // props 只读（第 22 章 shallowReactive）
+    }
+    ctx[key] = value;
+    return true;
+  },
+};
+</code></pre>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox">this.xxx 查找顺序</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">① setupState</span>
+      <span class="farrow">→</span>
+      <span class="fbox">② data</span>
+      <span class="farrow">→</span>
+      <span class="fbox">③ props</span>
+      <span class="farrow">→</span>
+      <span class="fbox gray">④ ctx（方法/computed）</span>
+    </div>
+    <div class="cap">accessCache 把「第一次走哪条路」记下来 —— 之后每次访问直达，不再逐兜翻找</div>
+  </div>
+  <div class="callout deep">
+    <span class="tag">🧠 三个「原来如此」</span><br>
+    ① <b>&lt;script setup&gt; 的变量最快</b>（31.5 的编译期结论在运行时的对应物）：它排在查找链第一位；<br>
+    ② <b>props 只读不是约定是代码</b>：set 钩子对 props 赋值直接拦截 + 警告；<br>
+    ③ 模板里 <code class="inline">this.$emit</code> 能用，是因为 $ 开头的属性在查找链里被放行到 ctx —— 前缀即命名空间。
+  </div>
+
+  <h2>19.7 shouldUpdateComponent 的完整判定表</h2>
+  <p>19.3 给的是思想版，官方真实判定是一条<b>优先级短路链</b> —— 从最快的检查往下走：</p>
+  <pre class="code" data-title="官方 shouldUpdateComponent（骨架）"><code>function shouldUpdateComponent(prevVNode, nextVNode, optimized) {
+  const { props: prevProps, children: prevChildren } = prevVNode;
+  const { patchFlag, props: nextProps, children: nextChildren } = nextVNode;
+
+  if (patchFlag &gt; 0) {                                  // ⭐ 编译产物走这里
+    if (patchFlag &amp; PatchFlags.DYNAMIC_SLOTS) return true;   // 动态插槽 → 必更
+    if (patchFlag &amp; PatchFlags.PROPS) {
+      for (const key of nextVNode.dynamicProps!) {          // ⭐ 只看编译期登记的动态键！
+        if (nextProps[key] !== prevProps[key]) return true;
+      }
+    }
+  } else if (!optimized) {                              // 手写渲染函数：全量判断
+    if (prevChildren || nextChildren) {
+      if (!nextChildren) return true;                   // 插槽从有到无
+      if (!prevChildren) return true;                   // 插槽从无到有
+    }
+    if (prevProps === nextProps) return false;          // 引用相等 → 短路跳过
+    if (!prevProps) return !!nextProps;
+    if (!nextProps) return true;
+    return hasPropsChanged(prevProps, nextProps);       // 逐键 Object.is（19.3）
+  }
+  return false;                                         // ⭐ 默认不更新
+}</code></pre>
+  <table>
+    <tr><th>情形</th><th>判定</th></tr>
+    <tr><td>编译产物 + dynamicProps 全没变</td><td>false —— 子组件连 render 都不执行（日常最常见快路径）</td></tr>
+    <tr><td>编译产物 + dynamicProps 某键变了</td><td>true —— 只比了 O(动态键数) 就出结果</td></tr>
+    <tr><td>父透传 attrs / 子有插槽内容变化</td><td>保守 true（父重渲染可能波及子）</td></tr>
+    <tr><td>手写渲染函数 + props 引用相等</td><td>false（引用相等短路）</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 又一处「编译给运行时递情报」</span><br>
+    没有编译器时，资格审查要遍历<b>全部</b> props 逐键比；有编译器时，dynamicProps 直接告诉运行时
+    「只有这几个键可能变」—— 判定成本从 O(全部 props) 降到 O(动态 props)。
+    和 15.7 的快慢车道、30 章的 Block Tree 是同一枚硬币的三个面。
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：组件化（压轴大题）</summary>
+    <div class="quiz-body">
+      <p>1. 从「点击按钮 count++」到「页面数字变化」，完整走一遍涉及的所有章节机制（口述题）。<br>
+         2. 父组件重渲染、子组件 props 未变，子组件的 render 会执行吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. ① ref 的 set 拦截（第 7 章）→ ② triggerRefValue 找到组件 update effect（第 5 章）→ ③ queueJob 入队，微任务 flush（第 23 章）→ ④ effect.run 重跑 render，读 count 被重新 track（第 2/4 章）→ ⑤ 新旧 subTree 走 patch/diff（第 17/18 章）→ ⑥ 最小化 DOM 更新上屏。<br>
+         2. render 不执行（shouldUpdateComponent 拦截 + vnode 复用）；DOM 也不会重建 —— 子树 vnode 对象都没变，patch 直接短路。这就是 Vue 组件树的自动剪枝。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="component">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#diff"><span class="dir">上一章</span><span class="t">← patch 与 diff：最长递增子序列</span></a>
+    <a class="next" href="#blocktree"><span class="dir">下一章</span><span class="t">Block Tree 的运行时消费 →</span></a>
+  </div>
+</section>
+
+<section class="page" id="page-blocktree">
+  <div class="kicker">第 20 章 · 渲染器篇</div>
+  <h1>Block Tree 的运行时消费</h1>
+  <p class="lead">
+    第 30 章讲了编译器怎么生成 <code class="inline">dynamicChildren</code>（跳过清单），
+    本章补上另一半：<b>运行时怎么消费这份清单</b>。openBlock / createBlock 这两个你天天在编译产物里看到的函数，
+    合起来不过 30 行 —— 但它们是「靶向更新」的发动机。
+  </p>
+
+  <h2>20.1 Block 栈：30 行的收集器</h2>
+  <pre class="code" data-title="runtime-core 的 block 机制（源码级简化）"><code>// ⭐ 全局 Block 栈：支持嵌套（v-if/v-for 各自开新 Block）
+let currentBlock: (VNode[] | null)[] = [];
+
+export function openBlock(disableTracking = false) {
+  currentBlock.push(disableTracking ? null : []);
+}
+
+export function createElementBlock(...) {
+  return setupBlock(createBaseVNode(...));
+}
+
+function setupBlock(vnode) {
+  vnode.dynamicChildren = isBlockTreeEnabled
+    ? currentBlock.pop() || []    // ⭐ 弹出栈顶 = 我这个 Block 收集到的全部动态节点
+    : [];
+  // 自己作为子 Block，还要被父 Block 收集
+  if (currentBlock.length) currentBlock[currentBlock.length - 1].push(vnode);
+  return vnode;
+}
+
+// 普通动态子节点（createVNode 内部）：
+if (currentBlock &amp;&amp; vnode.patchFlag &gt; 0) {
+  currentBlock[currentBlock.length - 1].push(vnode);   // 扁平收集！不按层级
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 关键设计：扁平收集，不按层级</span><br>
+    dynamicChildren 是一个<b>扁平数组</b>，深度为 10 的嵌套里某个动态文本，和顶层动态属性在同一个清单里。
+    传统 diff 要「逐层递归找出变化」，Block 只需「遍历清单逐个 patch」——
+    <b>静态层级被整个跳过</b>，这就是编译期信息换来的运行时豁免。
+  </div>
+
+  <h2>20.2 patchBlockChildren：对比清单而非对比树</h2>
+  <pre class="code" data-title="官方 patchBlockChildren（renderer.ts，完整逻辑就这么短）"><code>const patchBlockChildren = (oldChildren, newChildren, fallbackContainer) =&gt; {
+  // ⭐ 只 diff 两个动态清单（长度天然一致：同一模板编译产物）
+  for (let i = 0; i &lt; newChildren.length; i++) {
+    const oldVNode = oldChildren[i];
+    const newVNode = newChildren[i];
+    patch(oldVNode, newVNode, fallbackContainer, null, ...);  // 逐个走 patch，但只在清单内
+  }
+  // props/指令仍按 patchFlag 快慢车道处理（15.7）
+};</code></pre>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">旧 diff：整棵树递归</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">100 个节点全部走一遍 isSameVNodeType</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">Block diff：查清单</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">只处理 dynamicChildren 里的 3 个动态节点</span>
+        <span class="farrow">→</span>
+        <span class="fbox">97 个静态节点零成本</span>
+      </div>
+    </div>
+    <div class="cap">更新成本从 O(全部节点) 降到 O(动态节点) —— 页面越静态，收益越大</div>
+  </div>
+
+  <h2>20.3 边界：v-if / v-for 为什么必须「开新 Block」</h2>
+  <table>
+    <tr><th>场景</th><th>为什么打断收集</th></tr>
+    <tr><td>v-if 分支切换</td><td>子树结构可能完全不同 —— 旧清单作废，新分支自己开 Block 重新收集</td></tr>
+    <tr><td>v-for 列表</td><td>长度可变 → 每个 item 开新 Block，diff 只在清单间进行（32.5）</td></tr>
+    <tr><td><code class="inline">h()</code> 手写渲染</td><td>没有编译信息，isBlockTreeEnabled 下的收集照跑，但无 patchFlag 意义有限</td></tr>
+    <tr><td>手动 <code class="inline">openBlock(true)</code></td><td>disableTracking：确定无动态内容的 Block 不收集，进一步省内存</td></tr>
+  </table>
+  <div class="callout warn">
+    <span class="tag">⚠️ 手写渲染函数的「裸奔」</span><br>
+    直接用 <code class="inline">h()</code> 写渲染函数时没有 openBlock/createBlock 包裹，
+    更新走完整 patch —— 不是 bug，是「没有编译情报就得付全价」。
+    这也解释了为什么官方坚持「模板优先」：同样的组件，模板编译产物天然带 Block + patchFlag，
+    手写 JSX/渲染函数两样都没有。React 选择优化运行时来补偿，Vue 选择扩大编译期职权。
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：Block Tree 运行时</summary>
+    <div class="quiz-body">
+      <p>1. dynamicChildren 里的节点还需要递归 diff 吗？<br>
+         2. openBlock 为什么设计成栈？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 清单内的节点仍然 patch（属性/文本可能变），但<b>不再整树递归找它们</b> ——
+        位置由编译期确定，清单顺序在两次渲染间保持一致（结构变化会开新 Block）。<br>
+        2. 因为 Block 可以嵌套：v-if/v-for 子树各开新 Block，先收集完的子 Block 先弹出并登记到父 Block ——
+        栈恰好表达「子 Block 完成时回归父 Block 继续收集」。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="blocktree">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#component"><span class="dir">上一章</span><span class="t">← 组件化：响应式 × 渲染器合流</span></a>
+    <a class="next" href="core.html#startflow"><span class="dir">下一章</span><span class="t">启动全流程：createApp → 像素 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+<script src="assets/labs/common.js?v=1"></script>
+<script src="assets/labs/renderer.js?v=1"></script>
+</body>
+</html>

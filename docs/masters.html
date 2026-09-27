@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 高手篇</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 49 perf ============ -->
+<section class="page" id="page-perf">
+  <div class="kicker">第 49 章 · 高手篇</div>
+  <h1>性能优化：源码视角</h1>
+  <p class="lead">
+    学完源码，性能优化不再是背清单 —— 每一条优化你都能说出「为什么有效」。
+    本章把全书知识串成 8 个实战招式，每招标注原理出处。
+  </p>
+
+  <h2>49.1 八招速查表</h2>
+  <table>
+    <tr><th>招式</th><th>适用场景</th><th>为什么有效（原理）</th></tr>
+    <tr>
+      <td><b>① 大数据用 shallowRef</b></td>
+      <td>万行表格、图表数据</td>
+      <td>跳过深层代理（第 11 章）：10 万对象 × 每对象的 get 拦截全免</td>
+    </tr>
+    <tr>
+      <td><b>② 第三方实例 markRaw</b></td>
+      <td>Three.js / Map / 类实例</td>
+      <td>深层代理对它们毫无意义还破坏 === 判等（第 11/12 章）</td>
+    </tr>
+    <tr>
+      <td><b>③ 昂贵计算用 computed</b></td>
+      <td>过滤/排序/聚合</td>
+      <td>dirty 标记缓存：依赖不变不重算（第 8 章），还能链式传播</td>
+    </tr>
+    <tr>
+      <td><b>④ 精确 watch source</b></td>
+      <td>监听深层对象里一个字段</td>
+      <td><code class="inline">() => obj.a</code> 只 track 一个属性（第 9 章）；watch(obj) 的 traverse 全树点名</td>
+    </tr>
+    <tr>
+      <td><b>⑤ v-memo 缓存子树</b></td>
+      <td>昂贵的列表项</td>
+      <td>依赖数组不变 → 直接复用旧 vnode，diff 整段跳过（第 17 章 === 短路的放大版）</td>
+    </tr>
+    <tr>
+      <td><b>⑥ 稳定的 key</b></td>
+      <td>一切列表</td>
+      <td>LIS 命中率最大化 → DOM 移动最少（第 18 章）；index 当 key 是灾难</td>
+    </tr>
+    <tr>
+      <td><b>⑦ 静态内容外提</b></td>
+      <td>v-for 内的固定部分</td>
+      <td>静态提升只提升「模板级」静态节点（第 30 章）—— 手动外提才算数</td>
+    </tr>
+    <tr>
+      <td><b>⑧ v-show 替 v-if（高频切换）</b></td>
+      <td>tab、弹层</td>
+      <td>v-if 动结构 → 开新 Block 走慢路径 + 组件重建（第 30 章）；v-show 只改 style</td>
+    </tr>
+  </table>
+
+  <h2>49.2 招式详解：v-memo —— 手动挡的缓存</h2>
+  <pre class="code" data-title="v-memo 的原理与用法"><code>&lt;!-- 依赖数组 [item.id, item.selected] 不变 → 整个 &lt;li&gt; 的 vnode 直接复用，diff 跳过 --&gt;
+&lt;li v-for="item in list" :key="item.id" v-memo="[item.id, item.selected]"&gt;
+  &lt;expensive-avatar :id="item.id" /&gt;
+  &lt;span&gt;{{ item.name }}&lt;/span&gt;
+&lt;/li&gt;
+
+// 编译后的等价逻辑（思想）：
+const memo = oldVNode.memo;
+if (memo &amp;&amp; memo.every((v, i) => v === newDeps[i])) {
+  return oldVNode;         // 一模一样的 vnode → patch 处 oldVNode === vnode 短路
+}
+newVNode.memo = newDeps;</code></pre>
+  <p>
+    注意边界：<b>v-memo 缓存的是「渲染结果」</b>，依赖数组里漏写的字段变了也不会刷新 ——
+    它是性能的手术刀，也是正确性的自留地，慎用但好用。
+  </p>
+
+  <h2>49.3 一个完整的优化案例走查</h2>
+  <p>需求：渲染 5000 行员工表，支持「选中行高亮 + 部门筛选」。烂写法 vs 源码视角写法：</p>
+  <pre class="code" data-title="❌ 烂写法：每一行都在发烧"><code>const employees = reactive(fetch5000Rows());   // 5000 行全部深层代理（招式①✗）
+
+const selected = reactive(new Set());          // 响应式 Set 存选中态，行级更新
+
+// 模板里：
+// &lt;tr v-for="(emp, i) in employees" :key="i"          ← index 当 key（招式⑥✗）
+//    :class="{ active: selected.has(emp) }"&gt;
+//   &lt;td v-for="col in 20Columns"&gt;{{ emp[col] }}&lt;/td&gt; &lt;!-- 10 万个动态绑定 --&gt;
+
+// 点击一行 → selected.has 触发 → 所有 5000 行全部重渲染（没有组件边界剪枝）
+// 更新路径：5000 行 × 20 列的 patch —— 每次点击 10 万次属性检查</code></pre>
+  <pre class="code" data-title="✅ 源码视角写法"><code>// ① 数据：shallowRef，整体替换（不可变更新）
+const employees = shallowRef(fetch5000Rows());
+function toggleSelect(id) {
+  employees.value = employees.value.map(e =>
+    e.id === id ? { ...e, selected: !e.selected } : e);
+}
+
+// ② 派生：computed 缓存筛选结果（依赖不变不重算）
+const filtered = computed(() => employees.value.filter(e => match(e, keyword)));
+
+// ③ 行组件化：props 是 { emp } 单对象
+const Row = {
+  props: ["emp"],
+  template: `&lt;tr :class="{ active: emp.selected }"&gt;…&lt;/tr&gt;`,
+};
+
+// 模板：&lt;Row v-for="emp in filtered" :key="emp.id" /&gt;
+//   ↑ 稳定 key + 行级组件边界：shouldUpdateComponent 浅比较 emp 引用
+//   → 未变化的行直接跳过（第 19 章的剪枝）</code></pre>
+  <p>
+    效果对比：点击一行的更新成本从「10 万次属性检查」降到「1 个新数组 + 1~2 行的组件重渲染」。
+    没有一行代码是玄学 —— 每一步都对应你学过的某一章。
+  </p>
+
+  <div class="callout deep">
+    <span class="tag">🧠 性能优化的第一性原理</span><br>
+    全书所有优化殊途同归于一句话：<b>给「不变的东西」发放免死金牌。</b><br>
+    静态提升（vnode 不变）、computed（结果不变）、v-memo（子树不变）、shouldUpdateComponent（props 不变）、
+    LIS（相对顺序不变）、invoker（监听器壳不变）。框架作者和你玩的是同一个游戏：<b>识别不变量，跳过它。</b>
+  </div>
+
+  
+  <h2>49.4 三个真实场景的优化清单（附原理出处）</h2>
+  <p>招式背完，落到三个最高频的场景。每条都标注它利用了本书哪一章的机制：</p>
+  <p><b>场景一：千行大列表</b></p>
+  <ul>
+    <li>行组件化 + 行内少渲染 —— shouldUpdateComponent 浅比较短路（第 19.3 节）；</li>
+    <li>带稳定 key —— 走 Keyed diff 的身份复用（第 16/25.5 节）；</li>
+    <li>列表数据 shallowRef + 整体替换 —— 深层代理的 1 万次 track 省掉（第 11.3 节）；</li>
+    <li>行内容用 <code class="inline">v-memo="[item.updatedAt]"</code> —— 编译期缓存 vnode（第 49.2 节）；</li>
+    <li>超长列表上虚拟滚动 —— 只渲染视口（这超出框架职责，是工程手段）。</li>
+  </ul>
+  <p><b>场景二：复杂表单</b></p>
+  <ul>
+    <li>输入防抖用 customRef 而不是 watch+setTimeout —— 把「防抖」沉进响应式（第 11.4 节）；</li>
+    <li>校验规则用 computed 派生而不是 watch 同步 —— 脏标记缓存只算一次（第 8 章）；</li>
+    <li>大表单对象拆组件 + v-model —— 每个字段独立 patchFlag 定向更新（第 30.4 节）。</li>
+  </ul>
+  <p><b>场景三：高频开关的弹窗/抽屉</b></p>
+  <ul>
+    <li>开关本身用 v-show —— 避免反复 mount/unmount（第 50 章基础篇 Q5）；</li>
+    <li>内容用 KeepAlive 包住 —— 状态保留 + 激活/失活钩子（第 24.3 节）；</li>
+    <li>开关动画用 Transition enter/leave —— 真实过渡掐表（第 27 章）；</li>
+    <li>弹窗内容树避免内联函数 —— cacheHandlers + invoker 双保险（第 15.3/30.6 节）。</li>
+  </ul>
+  <div class="callout tip">
+    <span class="tag">💡 清单的共同点</span><br>
+    逐条回看你会发现：<b>所有优化都不是「更快地做事」，而是「想清楚哪些事不用做」</b>——
+    不用 track 的（shallow）、不用 diff 的（key/memo）、不用重算的（computed）、不用换监听器的（invoker）。
+    这就是第 49.1 节那句话的全部含义：识别不变量，跳过它。
+  </div>
+
+  <h2>49.4 性能排查工作流：从「感觉慢」到「指哪打哪」</h2>
+  <table>
+    <tr><th>步</th><th>工具</th><th>看什么</th></tr>
+    <tr><td>① 定位组件</td><td>vue-devtools → Inspector</td><td>打开「Highlight renders / 渲染追踪」：谁在渲染、为什么渲染（props 变了？依赖变了？）</td></tr>
+    <tr><td>② 看热点</td><td>Chrome Performance 面板</td><td>长任务里找 <code class="inline">render</code> / <code class="inline">patch</code> 栈 —— 大 diff = 大子树没有剪枝（回看 19.3 shouldUpdateComponent）</td></tr>
+    <tr><td>③ 查依赖</td><td>devtools → 组件 → Dependencies</td><td>依赖列表异常庞大 = deep watch 大树 或 getter 里读了过多字段（隐形收集）</td></tr>
+    <tr><td>④ 分层下药</td><td>数据层 / 结构层 / 编译层</td><td>数据：shallowRef + markRaw（11 章）；结构：v-memo + 组件化拆分（49.2）；编译：patchFlag 已自动（49.1）</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 「为什么这个组件渲染了」是性能排查的元问题</span><br>
+    一切 Vue 性能问题最终都归结为这个问题的答案。devtools 的渲染追踪会直接给出原因分类：
+    父组件渲染（连带）、props 变化、自身依赖变化 —— 对应的解法完全不同
+    （剪枝 / 浅比较 / 缩小依赖）。
+    先问为什么，再动手优化 —— 这是把 49 章八招用在刀刃上的前提。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：性能直觉</summary>
+    <div class="quiz-body">
+      <p>1. <code class="inline">v-for="item in list"</code> 的 list 是 shallowRef，用 <code class="inline">list.value.push(x)</code> 后界面没更新 —— 给出两种修复及原理？<br>
+         2. 为什么「行组件化 + 稳定 key」比「一个大模板渲染全表」快？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+         1. 修复A：整体替换 <code class="inline">list.value = [...list.value, x]</code>（触发 ref 的 set）；修复B：push 后手动 <code class="inline">triggerRef(list)</code>。原理：shallowRef 只监听 .value 本身的替换（第 11 章）。<br>
+         2. 大模板 = 每次更新 patch 整棵 10 万绑定的树；行组件化后每行是独立组件，shouldUpdateComponent 用引用相等短路 —— 未变的行连 render 都不执行（第 19 章），diff 天然按行分治。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="perf">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="build.html#build5"><span class="dir">上一章</span><span class="t">← 写完⑤：集合拦截器与收官</span></a>
+    <a class="next" href="#interview"><span class="dir">下一章</span><span class="t">面试通关：分级题库 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 50 interview ============ -->
+<section class="page" id="page-interview">
+  <div class="kicker">第 50 章 · 高手篇</div>
+  <h1>面试通关：分级题库</h1>
+  <p class="lead">
+    24 道真题按「基础 → 进阶 → 高手」分级。建议做法：先只看问题，
+    口头作答，再展开对照要点 —— 答不上的那道，就回去翻对应章节。
+  </p>
+
+  <h2>🟢 基础篇（答不出建议回炉）</h2>
+  <details class="quiz">
+    <summary>Q1. Vue3 响应式的整体原理？用一句话 + 一张图回答。</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>Proxy 拦截读写（第 3 章）→ 读时 track、写时 trigger（第 4/5 章）→ effect 重跑驱动视图。
+      高分画图：WeakMap(target) → Map(key) → Map(effect→trackId) 三层名册。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q2. reactive 和 ref 的区别？分别什么时候用？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>reactive = Proxy 代理对象（只有对象能用，第 3 章）；ref = 带 getter/setter 的盒子（原始值唯一方案，第 7 章），
+      内部 toReactive 套娃。选用心法见第 12 章（默认 ref，组合状态 reactive+toRefs）。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q3. 为什么模板里不用写 .value，script 里要写？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>setup 返回值/模板上下文经过 proxyRefs（第 7 章）：get 时自动拆箱 ref.value、set 时自动装箱。两条通道，一套语义。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q4. Vue2 和 Vue3 响应式的差异？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>defineProperty → Proxy（第 3 章对比表）：新增属性/数组索引/删除全支持、惰性深层代理、多属性统一拦截。
+      附加分：依赖结构从 dep.subs(watcher 数组) 变为三层 Map + trackId 版本号清理（第 6 章）。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q5. computed 和 watch 的区别与取舍？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>computed = 派生值（返回值、有缓存、不能异步，第 8 章脏标记）；watch = 副作用（不返回值、能异步、有 onCleanup 处理竞态，第 9 章）。同源：都是 ReactiveEffect + 自定义 scheduler（第 5 章的表格）。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q6. v-if 和 v-show 的区别？（要求源码级答案）</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>不止「销毁 vs display:none」：v-if 改变结构 → 编译期开新 Block、走传统递归 patch（第 30 章）；v-show 编译成 style patchFlag，走快路径。高频切换用 v-show 的深层原因在此。
+    </div></div>
+  </details>
+
+  <h2>🟡 进阶篇（拉开差距区）</h2>
+  <details class="quiz">
+    <summary>Q7. 为什么 Proxy 必须配合 Reflect.get(target, key, receiver)？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>receiver 矫正 getter 里的 this 指向代理，否则 getter 内部的属性读取不经过代理 → 依赖静默丢失（第 3 章有完整实验）。能举 aliasName 例子 = 满分。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q8. 分支切换后旧依赖怎么清理？讲讲 3.4/3.5 的优化。</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>老方案全删重建；3.4 起「增量清理」：3.4 用双向链表组织依赖，3.5 再叠加版本号对账（link.version 快照 vs dep.version，外加 globalVersion 快路径），只清理真正过期的依赖（第 6、14 章）。能类比 vnode diff 的「增量更新」哲学 = 加分。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q9. watch 传对象时为什么要 traverse？直接 watch(() => obj) 为什么不行？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>effect 里必须有「属性读取」才有 track；只返回对象引用 = 零收集。traverse 深度遍历 = 逐属性点名（第 9 章）。附加分：seen 集合防循环引用。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q10. 组件更新流程：父组件数据变了，子组件一定会重渲染吗？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>不一定。updateComponent 复用组件实例，shouldUpdateComponent 做 props 浅比较（Object.is），没变则只吃掉新 vnode 跳过重渲染（第 19 章）。子组件内部状态（自己的响应式数据）才会驱动它自身的 update effect。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q11. 为什么 Vue 的批量更新能合并多次修改？和 nextTick 什么关系？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>trigger → scheduler → queueJob（Set 去重）→ 微任务 flushJobs（第 23 章）：同步代码全部跑完后才统一 patch，一组件一次。nextTick = 把回调排到 flushJobs 之后。能画出事件循环时序图 = 加分。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q12. 为什么列表不能用 index 当 key？讲讲 diff 的 LIS。</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>key 是身份不是座位（第 18 章）。index 平移 → 身份错位 → 错误复用 + 大面积移动。LIS：newIndexToOldIndex 中最长递增子序列的节点保持不动，其余 insert —— 数学上最少移动。能白板写出五步预处理 = 强。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q13. props 为什么是 shallowReadonly？子组件改 props 深层属性会怎样？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>props 所有权在父组件，锁写 + 不重复代理（第 11 章）。第一层 set 被拦截并告警；深层（shallow 之外）能改成功但强烈不推荐 —— 正确姿势是 emit 事件让父组件改。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q14. 事件绑定 @click 每次渲染都换新函数，为什么不会频繁 addEventListener？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>两层防线：编译期 cacheHandlers 缓存内联函数引用（第 30 章）；运行期 invoker 壳子常驻、只替换 invoker.value（第 15 章）。两层配合 = 事件更新零 DOM 调用。
+    </div></div>
+  </details>
+
+  <h2>🔴 高手篇（offer 谈判筹码区）</h2>
+  <details class="quiz">
+    <summary>Q15. 手写：实现一个完整的 mini reactive（含 track/trigger/清理）。</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>就是第 3~6 章的全部。注意 3 个易错点：① Reflect.get 第三参 receiver（Q7）；② try/finally 还原 activeEffect（第 2 章）；③ trackId + depsLength 的增量清理（第 6 章）。本站实验室引擎就是标准答案。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q16. 手写：带缓存的 computed，要求支持链式依赖。</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>ComputedRefImpl 三件套（第 8 章）：内部 ReactiveEffect（run 时标净）、自定义 scheduler（只标脏+通知下游，不重算）、get value 里的 trackRefValue（让自己可被依赖）。链式传播 = 脏标记多米诺。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q17. 手写：最长递增子序列（要求 O(n log n)）。</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>贪心 + 二分（第 18 章代码）：result 存下标、尾大则 push、否则二分替换。口述为什么替换不破坏正确性（给未来留更低的台阶）。Vue 源码里它还有前驱节点数组还原完整序列 —— 能提到 = 真·读过源码。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q18. Vue3 比 Vue2 快在哪里？（要求三条以上，编译期 + 运行期）</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>编译期：静态提升、patchFlag 靶向更新、Block Tree 跳过静态子树、cacheHandlers（第 30 章）；
+      运行期：diff 五步预处理 + LIS（第 18 章）、组件更新剪枝（第 19 章）、3.4/3.5 的依赖增量清理（第 6、14 章）、事件 invoker（第 15 章）。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q19. 讲讲 Vue 的编译时 vs 运行时职责划分，和 React 的本质区别？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>Vue 模板是受限 DSL → 编译期可提取静态信息反哺运行时（第 30 章）；React JSX 是全量 JS 表达力 → 编译期无情报，运行时全量 diff（Fiber 的可中断渲染是对策）。一个「约束换性能」，一个「自由换调度」。能中性评价两者 = 成熟。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q20. effectScope 是什么？解决了什么问题？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>批量记账 + 批量 stop（第 10 章）：组件卸载一次性清理全部 watch/computed/渲染 effect。第三个「全局指针 + 暂存还原」模式的应用。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q21. 响应式 Set/Map 的坑？Vue 是怎么解决的？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>代理 !== 原对象 → Set.has 判等失效（第 12 章案例三）。Vue 的 collectionHandlers 劫持集合方法：内部统一 toRaw 存取。延伸：内存泄漏场景（存了组件代理不释放）。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q22. 自定义渲染器怎么写？原理是什么？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>createRenderer(renderOptions) 依赖注入（第 15 章）：提供 insert/remove/createElement/patchProp… 即可渲染到任意目标（canvas、终端、原生 App）。官方的 @vue/runtime-test（单元测试渲染器，第 43 章）就是这么诞生的。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q23. v-memo 的实现原理？它和 computed 的缓存有什么本质区别？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>v-memo 缓存 vnode（渲染结果，浅比较依赖数组，第 49 章）；computed 缓存值（getter 结果，响应式脏标记驱动，第 8 章）。一个在渲染层跳过 diff，一个在数据层跳过计算 —— 两个层次的不变量。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q24. 开放题：如果让你给这个 mini-vue3 提 PR，你会修什么？（送分题，考察你是否真读了源码）</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点（本站发现的两处 + 延伸）：</b>① RefImpl.set 里补 <code class="inline">this._value = toReactive(newValue)</code>（第 7 章彩蛋）；
+      ② set 拦截的 <code class="inline">!==</code> 换 <code class="inline">!Object.is</code> 防 NaN 重复触发（第 5 章）；
+      ③ traverse 里 <code class="inline">if (isObject(source)) return source</code> 疑似把对象提前返回了（应先 seen.add 再判断，可对照官方源码）—— 你发现了吗？
+    </div></div>
+  </details>
+
+  
+  <h2>🟣 拓展篇（新一季高频题）</h2>
+  <details class="quiz">
+    <summary>Q25. 数组的 push 为什么能触发响应式？Vue 做了什么特殊处理？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>push 内部会「读 length（track）→ 写 length（trigger）」。官方对数组做了三件事：
+      方法拦截器（instrumentations）重写 push/pop/includes 等避免依赖错乱；改 length 时把「下标 ≥ 新 length」
+      的已登记 dep 一并触发（第 5.5 节源码）；迭代方法依赖 ITERATE_KEY 哨兵。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q26. &lt;script setup&gt; 为什么比普通 setup 更快？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>两层编译期收益：① 变量来源静态化 —— 绑定在编译期已知，生成闭包直取代码，
+      不再经 <code class="inline">_ctx</code> 代理查找（第 31.5 节）；② defineProps/defineEmits 宏被原地拆成
+      静态组件选项，绑定信息更完整让 patchFlag 更精准（第 34.4 节）。运行时少做的一切，都是编译期多知道的信息换来的。
+    </div></div>
+  </details>
+  <details class="quiz">
+    <summary>Q27. 为什么 Vue3 可以彻底不需要 Vue.set？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>要点：</b>Vue2 用 defineProperty 必须初始化时给「已知属性」装监听，新增属性无从监听 —— 只能 Vue.set 补装。
+      Proxy 拦截的是「整个对象的一切属性访问」，新增属性天然可追踪（第 3.1 节表格）；
+      官方还配合 ADD 操作类型 + ITERATE_KEY，让 for...in 对新增也能响应（第 5.5 节）。
+    </div></div>
+  </details>
+
+<button class="read-btn" data-page="interview">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#perf"><span class="dir">上一章</span><span class="t">← 性能优化：源码视角</span></a>
+    <a class="next" href="roadmap.html#roadmap"><span class="dir">下一章</span><span class="t">结业：路线与彩蛋 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+</body>
+</html>

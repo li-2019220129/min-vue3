@@ -1,0 +1,1260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 响应式篇</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 02 effect ============ -->
+<section class="page" id="page-effect">
+  <div class="kicker">第 2 章 · 响应式篇</div>
+  <h1>effect：万物的起点</h1>
+  <p class="lead">
+    在 Vue 里，你写的每一行模板、每一个 computed、每一个 watch，最后都会变成一个
+    <b>effect（副作用）</b>。它是整个响应式大厦的地基。这一章我们把地基砸开看看。
+  </p>
+
+  <h2>2.1 什么是「副作用」？</h2>
+  <p>先别管 Vue，看一段最普通的代码：</p>
+  <pre class="code" data-title="一个普通的函数"><code>const state = { name: "张三", age: 18 };
+
+function renderTitle() {
+  document.title = state.name;   // 读了 name，还顺手改了页面标题
+}</code></pre>
+  <p>
+    <code class="inline">renderTitle</code> 除了返回值，还<b>对外面的世界产生了影响</b>（改了标题）——
+    这种「影响」就叫<b>副作用（side effect）</b>。
+  </p>
+  <p>现在问题来了：</p>
+  <blockquote>如果有人改了 <code class="inline">state.name</code>，<code class="inline">renderTitle</code> 怎么才能<b>自动重新执行</b>？</blockquote>
+  <p>
+    Vue 要做的事情，本质上就一句话：<b>在一个函数「读」数据时记住它，在数据「变」时重新喊它。</b>
+    围绕这句话，产生了两个核心动作 —— 你将在这本书里反复遇到它们：
+  </p>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox blue">读取时登记<br><small>track（依赖收集）</small></span>
+      <span class="farrow">＋</span>
+      <span class="fbox rose">修改时通知<br><small>trigger（派发更新）</small></span>
+      <span class="farrow">＝</span>
+      <span class="fbox">响应式 ✨</span>
+    </div>
+  </div>
+
+  <h2>2.2 ReactiveEffect：给函数发一张「身份证」</h2>
+  <p>
+    要「记住」一个函数，光有函数本身不够 —— 函数是匿名的，没法当 key 存进 Map。
+    所以源码包了一个类 <code class="inline">ReactiveEffect</code>，把函数变成<b>对象</b>，
+    对象就有身份、能被 Map 存了。来看源码（有删节，保留主干）：
+  </p>
+  <pre class="code" data-title="packages/reactivity/src/effect.ts"><code>export let activeEffect;                 // ⭐ 全局指针：当前正在执行哪个 effect
+
+export class ReactiveEffect {
+  _trackId = 0;          // 执行了几轮（用来识别「本轮」新收集的依赖，第 6 章主角）
+  deps = [];             // 双向记录：我读过哪些 dep（反向指针）
+  _depsLength = 0;       // 本轮收集到第几个 dep 了（双指针清理，第 6 章主角）
+  _running = 0;          // 防止自己触发自己 → 死循环
+  public active = true;  // 停止开关
+
+  constructor(public fn, public scheduler) {}   // fn=函数本体, scheduler=调度器(第5章讲)
+
+  run() {
+    if (!this.active) return this.fn();  // 已停止：普通调用，不收集依赖
+
+    let lastEffect = activeEffect;       // ① 暂存上一个 effect（支持嵌套）
+    try {
+      activeEffect = this;               // ② 把全局指针指向自己 ⭐ 关键一步
+      preCleanEffect(this);              // ③ 本轮收集开始：_trackId++, _depsLength=0
+      this._running++;                   // ④ 标记「我在运行中」
+      return this.fn();                  // ⑤ 真正执行函数 → 里面的读取会触发 track
+    } finally {
+      this._running--;                   // ⑥ 恢复
+      postCleanEffect(this);             // ⑦ 收尾：清掉本轮不再需要的旧依赖
+      activeEffect = lastEffect;         // ⑧ 还原全局指针
+    }
+  }
+}</code></pre>
+
+  <h3>逐行解读最关键的 ②⑤ 两步</h3>
+  <ul>
+    <li><b>② <code class="inline">activeEffect = this</code></b>：在函数执行前，把自己挂到全局变量上。这样函数体里每读一个属性，<code class="inline">track</code> 都能通过 <code class="inline">activeEffect</code> 知道「现在是谁在读」—— <b>没有这一步，依赖收集根本无从谈起</b>。</li>
+    <li><b>⑤ <code class="inline">this.fn()</code></b>：执行函数本体。函数里所有对响应式数据的读取，都会被 Proxy 拦截（下一章），进而查到 <code class="inline">activeEffect</code>，完成登记。这就是 Vue 的「读取即收集」。</li>
+  </ul>
+
+  <div class="callout tip">
+    <span class="tag">💡 比喻时间：追踪器</span><br>
+    把 <code class="inline">activeEffect</code> 想象成特工电影里的<b>追踪器</b>：
+    特工（effect）潜入目标家（执行 fn）之前，指挥部先给他别上追踪器（activeEffect = this）。
+    他在屋里碰过的每一样东西（读过的每个属性）都会被记录（track）。
+    任务结束后追踪器收回（activeEffect = lastEffect），下一批特工再来。
+  </div>
+
+  <h3>try/finally 的讲究（⑧ 为什么放 finally）</h3>
+  <p>
+    如果 <code class="inline">this.fn()</code> 中途<b>抛异常</b>，没有 finally 的话
+    <code class="inline">activeEffect</code> 会永远停留在「我」身上，后续无关代码的读取会被错误地收集到我名下。
+    finally 保证指针<b>无论成功还是炸了都会还原</b> —— 响应式系统的健壮性就藏在这些细节里。
+  </p>
+
+  <h2>2.3 effect()：对外的大门</h2>
+  <pre class="code" data-title="packages/reactivity/src/effect.ts"><code>export function effect(fn, options?) {
+  const _effect = new ReactiveEffect(fn, () => {
+    _effect.run();                        // 默认调度器：直接重跑
+  });
+  _effect.run();                          // ⭐ 立即执行一次（首次收集依赖）
+
+  if (options?.scheduler) {
+    Object.assign(_effect, options);      // 允许用户自定义调度器
+  }
+  const runner = _effect.run.bind(_effect);
+  runner.effect = _effect;                // 返回可调用函数，还携带 effect 本体
+  return runner;
+}</code></pre>
+  <p>三件事：</p>
+  <ol>
+    <li><b>立即执行一次</b> —— 依赖收集不是凭空来的，必须先跑一遍函数才知道它读了什么；</li>
+    <li><b>可注入 scheduler</b> —— 数据变了不直接重跑，先调用 scheduler。computed 和 watch 全靠这个口子实现各自的脾气（第 8、9 章）；</li>
+    <li><b>返回 runner</b> —— 拿到它就像拿到一个「手动挡」的 effect，可以随时自己再跑。</li>
+  </ol>
+
+  <div class="callout warn">
+    <span class="tag">⚠️ 找个茬：源码里的可爱拼写</span><br>
+    本项目源码里有个函数叫 <code class="inline">tarckEffect</code> —— 没错，是 <b>track</b> 拼成了 <b>tarck</b> 😄。
+    不影响运行（拼写一致就行），但你在源码里搜索时别困惑。本站为了阅读体验统一写作 trackEffect。
+    <b>看源码时保持这种「怀疑精神」是好事</b>：官方源码也是人写的，也有手滑的时候。
+  </div>
+
+  <h2>2.4 Effect 全字段速查 + 一次完整的「心跳周期」</h2>
+  <p>读源码时最需要的一张表 —— ReactiveEffect 的 8 个字段，每个都值得认识：</p>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>作用</th><th>谁在用</th></tr>
+    <tr><td><code class="inline">fn</code></td><td>函数</td><td>副作用本体（渲染函数 / getter / 回调）</td><td>run()</td></tr>
+    <tr><td><code class="inline">scheduler</code></td><td>函数</td><td>数据变了之后「怎么办」的决定者</td><td>triggerEffects（第 5 章）</td></tr>
+    <tr><td><code class="inline">deps</code></td><td>数组</td><td>反向登记簿：我读过哪些 dep</td><td>清理机制（第 6 章）</td></tr>
+    <tr><td><code class="inline">_depsLength</code></td><td>数字</td><td>写指针：本轮登记到第几位</td><td>trackEffect / postClean</td></tr>
+    <tr><td><code class="inline">_trackId</code></td><td>数字</td><td>版本号：第几轮收集（识别「本轮」）</td><td>去重 + 增量清理</td></tr>
+    <tr><td><code class="inline">_running</code></td><td>数字</td><td>运行计数：&gt;0 表示正在执行 fn</td><td>防自杀循环（第 5 章）</td></tr>
+    <tr><td><code class="inline">active</code></td><td>布尔</td><td>总开关：stop() 之后变 false</td><td>run() 早退</td></tr>
+    <tr><td><code class="inline">_dirtyLevel</code></td><td>枚举</td><td>脏标记：还需要重算吗？（见 2.5）</td><td>computed（第 8 章）</td></tr>
+  </table>
+  <p>把 8 个字段放进时间轴，就是一个 effect 的「心跳周期」—— 创建、待命、触发、死亡：</p>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">new ReactiveEffect(fn, scheduler)</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">run()：_trackId++、_depsLength=0</span>
+        <span class="farrow">→</span>
+        <span class="fbox">fn 执行：读数据 → track 登记</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">……待命（登记簿在手）……</span>
+        <span class="farrow">数据变化</span>
+        <span class="fbox rose">trigger：标脏 + scheduler()</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">重跑 run()：回到第一格</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">runner.effect.stop()</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">active = false + 全部依赖注销</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">此后 run() 只是普通调用，不再登记</span>
+      </div>
+    </div>
+    <div class="cap">watch 的返回值（unwatch）就是第三行：effect.stop —— 第 9 章的「停止侦听」由此而来</div>
+  </div>
+
+  <h2>2.5 脏标记：从「档位」到「版本号」的演进</h2>
+  <pre class="code" data-title="packages/reactivity/src/constants.ts"><code>export enum DirtyLevels {
+  NoDirty = 0,   // 干净：值是最新的，不用重算
+  Dirty   = 4,   // 脏了：依赖变过，下次读取必须重算
+}</code></pre>
+  <p>
+    本项目用 0/4 两个档位表达「脏/干净」。官方的实现走过三个年代，值得当八卦听：
+    <b>3.2~3.3</b> 用一个布尔 dirty；<b>3.4</b> 曾扩展成四档
+    （MaybeDirty 系列，为 computed 的级联缓存做「也许脏 → 校验上游 → 判定真脏」的三级闸门）；
+    到了 <b>3.5</b>，四档脏标记被整个删掉，换成了更聪明的<b>版本号记账</b>：
+  </p>
+  <pre class="code" data-title="官方 3.5：dep.ts / effect.ts（节选）"><code>export class Dep {
+  version = 0;                 // 每次 trigger（写入）+1
+}
+export class Link {
+  version: number;             // 登记那一刻，快照下 dep 的 version
+}
+trigger(debugInfo?) {
+  this.version++;              // 写入 = 记一笔账
+  globalVersion++;             // 全局账本也 +1（computed 的快路径）
+  this.notify();
+}
+function isDirty(sub) {        // 读取时对账
+  for (let link = sub.deps; link; link = link.nextDep) {
+    if (link.dep.version !== link.version) return true;  // 有账对不上 → 脏
+  }
+  return false;
+}</code></pre>
+  <p>
+    一句话：<b>trigger 只把 dep 的 version +1（记账），读取时逐条比对 version（结账）。</b>
+    computed 还有一条全局 <code class="inline">globalVersion</code> 快路径 —— 只要全局账本号没动过，
+    连逐条对账都省了。理解这句话，第 8 章 computed 的「偷懒」就毫不神秘了，
+    完整展开在第 14 章官方精读。
+  </p>
+  <div class="callout tip">
+    <span class="tag">💡 顺带记一个改名</span><br>
+    官方 3.4 起，全局指针 <code class="inline">activeEffect</code> 更名为 <code class="inline">activeSub</code>
+    （<b>subscriber 订阅者</b>）。因为 computed 也成了「订阅 dep 的角色」，effect 不再是唯一的读者 ——
+    在官方源码里搜不到 activeEffect，别怀疑自己看错了。
+  </div>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么 stop() 还要 preClean + postClean？</span><br>
+    停止一个 effect 不仅要挡住未来（active = false），还要清掉过去（名册里的登记）——
+    否则数据变化仍会白白走进这个 effect 的 dep 分支。stop 直接复用 run 的两个清理函数，
+    一行不多写：「清理逻辑只写一遍」的复用典范。
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：effect 基础</summary>
+    <div class="quiz-body">
+      <p>1. 为什么 <code class="inline">effect(fn)</code> 必须立即执行一次 fn？<br>
+         2. 如果在 effect 里写 <code class="inline">state.count = state.count + 1</code> 会发生什么？源码靠什么机制兜底？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 因为依赖收集是「运行时」行为 —— 不跑一遍函数，系统根本不知道它读了哪些属性。首次执行 = 首次登记。<br>
+        2. 会触发「自己更新自己依赖的数据」：run() 里读取时 _running 已是 1，trigger 时检查 <code class="inline">effect._running === 0</code> 才触发 scheduler，运行中则跳过，避免无限递归死循环。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="effect">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="index.html#overview"><span class="dir">上一章</span><span class="t">← 全景：先看懂整个项目</span></a>
+    <a class="next" href="#reactive"><span class="dir">下一章</span><span class="t">reactive：Proxy 的魔法 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 03 reactive ============ -->
+<section class="page" id="page-reactive">
+  <div class="kicker">第 3 章 · 响应式篇</div>
+  <h1>reactive：Proxy 的魔法</h1>
+  <p class="lead">
+    上一章我们知道了「谁在读」—— activeEffect。但数据是死的，
+    它怎么知道「自己被读了」？答案是把普通对象换成<b>替身</b>：Proxy 代理。
+    本章还埋着一个高频面试陷阱题：Reflect 和 receiver。
+  </p>
+
+  <h2>3.1 一句话理解 Proxy</h2>
+  <p>Proxy 就是你给对象雇的一个<b>万能管家</b>：任何人想读属性、写属性，都必须先过管家这一关：</p>
+  <pre class="code" data-title="30 秒上手 Proxy"><code>const raw = { name: "张三" };
+
+const proxy = new Proxy(raw, {
+  get(target, key) {
+    console.log("有人读了", key);        // 拦截到了！
+    return target[key];
+  },
+  set(target, key, value) {
+    console.log("有人把", key, "改成了", value);
+    target[key] = value;
+    return true;
+  },
+});
+
+proxy.name;        // 控制台：有人读了 name
+proxy.name = "李四"; // 控制台：有人把 name 改成了 李四</code></pre>
+  <p>
+    「读/写都能被拦截」—— 这正是响应式的命门。
+    Vue2 用的 <code class="inline">Object.defineProperty</code> 只能在<b>初始化时</b>给已知属性装监控，
+    而 Proxy 是<b>全对象、全时段</b>的管家：
+  </p>
+  <table>
+    <tr><th>痛点</th><th>Vue2 defineProperty</th><th>Vue3 Proxy</th></tr>
+    <tr><td>新增属性 <code class="inline">obj.newKey = 1</code></td><td>❌ 监控不到（要靠 $set）</td><td>✅ set 拦截器直接捕获</td></tr>
+    <tr><td>数组下标 <code class="inline">arr[0] = 9</code></td><td>❌ 要劫持七个数组方法绕路</td><td>✅ 一视同仁</td></tr>
+    <tr><td>删除属性 <code class="inline">delete obj.key</code></td><td>❌ 监控不到（要靠 $delete）</td><td>✅ deleteProperty 拦截</td></tr>
+    <tr><td>惰性深层代理</td><td>❌ 初始化时递归整个对象</td><td>✅ 取到时才代理下一层</td></tr>
+  </table>
+
+  <h2>3.2 源码：createReactiveObject</h2>
+  <pre class="code" data-title="packages/reactivity/src/reactive.ts"><code>let targetMap = new WeakMap();          // 原对象 → 它的代理（缓存，防止重复代理）
+
+export function reactive(target) {
+  return createReactiveObject(target);
+}
+
+function createReactiveObject(target) {
+  if (!isObject(target)) {
+    return target;                        // 原始值直接返回：数字/字符串没法被 Proxy
+  }
+  if (target[ReactiveFlags.IS_REACTIVE]) {
+    return target;                        // 已经是代理了，别再包一层
+  }
+  const exitsProxy = targetMap.get(target);
+  if (exitsProxy) {
+    return exitsProxy;                    // 同一个对象第二次 reactive() → 返回缓存
+  }
+  let proxy = new Proxy(target, mutableHandlers);
+  targetMap.set(target, proxy);           // 登记缓存
+  return proxy;
+}</code></pre>
+
+  <h3>三个防御性检查，各有深意</h3>
+  <ul>
+    <li>
+      <b>非对象直接返回</b>：<code class="inline">reactive(18)</code> 是无效操作（Proxy 只能代理对象）。
+      这正是 <code class="inline">ref</code> 存在的理由 —— 第 7 章。
+    </li>
+    <li>
+      <b><code class="inline">target[IS_REACTIVE]</code></b>：注意！读这个 key 会触发代理的 get 拦截器，
+      拦截器里看到这个特殊 key 就直接返回 <code class="inline">true</code>（见下节源码第 8 行）。
+      一个属性同时实现了「识别身份」和「防重复包装」两个功能，很巧。
+    </li>
+    <li>
+      <b>WeakMap 缓存</b>：保证 <code class="inline">reactive(obj) === reactive(obj)</code>，
+      否则两个代理互不相认，数据会「精神分裂」。
+    </li>
+  </ul>
+
+  <h2>3.3 baseHandler：管家的工作手册</h2>
+  <pre class="code" data-title="packages/reactivity/src/baseHandler.ts"><code>export const mutableHandlers: ProxyHandler&lt;any&gt; = {
+  get(target, key, receiver) {
+    if (key === ReactiveFlags.IS_REACTIVE) {
+      return true;                        // 身份暗号：问我这个就说明我是代理
+    }
+    track(target, key);                   // ⭐ 读取登记（第 4 章）
+    let res = Reflect.get(target, key, receiver);
+    if (isObject(res)) {
+      return reactive(res);               // ⭐ 惰性深层代理：取到对象才继续包
+    }
+    return res;
+  },
+  set(target, key, value, receiver) {
+    let oldValue = target[key];
+    let result = Reflect.set(target, key, value, receiver);
+    if (oldValue !== value) {
+      trigger(target, key, value, oldValue);  // ⭐ 值变了才通知（第 5 章）
+    }
+    return result;
+  },
+};</code></pre>
+
+  <div class="callout deep">
+    <span class="tag">🧠 惰性代理：性能的小心思</span><br>
+    注意 get 里的 <code class="inline">return reactive(res)</code>：嵌套对象<b>不是</b>在
+    <code class="inline">reactive(obj)</code> 时一次性递归代理的，而是<b>被访问到的那一刻</b>才转成代理。
+    一个巨大的对象只用一个字段时，其他 99 层结构根本不会被代理 —— 按需付费。
+  </div>
+
+  <h2>3.4 ⚠️ 高频陷阱：为什么必须用 Reflect.get + receiver？</h2>
+  <p>这是本章压轴题，也是源码注释里作者特意强调的点。看这个对象：</p>
+  <pre class="code" data-title="一个带 getter 的对象"><code>const obj = {
+  name: "张三",
+  get aliasName() {          // aliasName 是个 getter
+    return this.name + "（别名）";   // ⚠️ 注意 this 指向谁？
+  },
+};</code></pre>
+  <p>当我们用代理去读 <code class="inline">proxy.aliasName</code> 时：</p>
+  <ol>
+    <li>代理的 get 拦截器被触发，<code class="inline">track(obj, 'aliasName')</code> ✅（aliasName 被登记）</li>
+    <li>拦截器内部去执行真正的 getter，getter 里写了 <code class="inline">this.name</code> ——
+      <b>this 指向谁，name 就在谁身上被读</b>；</li>
+    <li>如果用 <code class="inline">target[key]</code> 取值：this = 原始对象 obj →
+      读 name <b>不经过代理</b> → <code class="inline">track(obj, 'name')</code> 永远不会发生 ❌</li>
+    <li>如果用 <code class="inline">Reflect.get(target, key, receiver)</code>：this = 代理 proxy →
+      读 name <b>经过代理</b> → name 正常登记 ✅</li>
+  </ol>
+  <p>一句话总结：</p>
+  <blockquote>
+    <b>Reflect.get 的第三个参数 receiver，作用是把 getter 里的 this 矫正成代理</b>，
+    保证 getter 内部的属性读取也能被拦截、被收集。少了它，依赖会静默丢失，页面莫名不更新。
+  </blockquote>
+
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 实验：有 receiver vs 没 receiver<span class="hint">亲手制造一次「依赖丢失」</span></div>
+    <div class="demo-body">
+      <p style="font-size:16.5px;margin-top:0">
+        下面运行两套代理（同一份数据）：左边用 <code class="inline">Reflect.get(target, key, receiver)</code>，
+        右边用 <code class="inline">target[key]</code>。两个 effect 都只读 <code class="inline">aliasName</code>。
+        然后我们改 <code class="inline">name</code> —— 看看谁丢失了更新。
+      </p>
+      <div class="step-btns">
+        <button class="step-btn" data-reflect="1">① 运行两个 effect（读 aliasName）</button>
+        <button class="step-btn" data-reflect="2">② 修改 name = "李四"</button>
+        <button class="step-btn" data-reflect="reset">重置</button>
+      </div>
+      <div class="demo-grid">
+        <div class="demo-col">
+          <h4>✅ 用 Reflect + receiver</h4>
+          <div class="console" id="reflConsole1" style="height:170px"></div>
+        </div>
+        <div class="demo-col">
+          <h4>❌ 直接 target[key]</h4>
+          <div class="console" id="reflConsole2" style="height:170px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>3.5 懒代理展开全过程：一次深层读取到底发生了什么</h2>
+  <p>把「惰性深层代理」的每一个动作摊开 —— 以 <code class="inline">state.user.address.city</code> 为例：</p>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">effect 里读 state.user</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">get('user') 拦截</span>
+        <span class="farrow">→</span>
+        <span class="fbox">track + Reflect.get</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">res 是对象 → reactive(res) 转代理</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">接着读 .address（在 user 的代理上）</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">get('address') 拦截</span>
+        <span class="farrow">→</span>
+        <span class="fbox">track + Reflect.get</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">又是对象 → reactive(res)</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">最后读 .city</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">get('city') 拦截</span>
+        <span class="farrow">→</span>
+        <span class="fbox">track + 返回原始值 "杭州"</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">原始值不可再代理，链条终止</span>
+      </div>
+    </div>
+    <div class="cap">一条点号链 = 3 次 get 拦截、3 次 track、2 次按需转代理 —— 没被读过的层级零成本</div>
+  </div>
+  <p>
+    对比 Vue2：<code class="inline">defineProperty</code> 必须在初始化时<b>递归整棵对象</b>给每个属性装
+    getter/setter —— 数据多大，启动就多慢。Vue3 的懒代理把成本摊到了「实际访问」上：
+    一个 1 万个字段的对象只用了 3 个字段，其余 9997 个字段<b>根本不会被代理</b>。
+    这也是第 11 章「大对象用 shallowRef」的理论根基 —— 浅层版连这一步展开都省了。
+  </p>
+
+  <h2>3.6 官方没细讲的暗号本：ReactiveFlags 全家 + handlers 四象限</h2>
+  <p>
+    本项目的 <code class="inline">constants.ts</code> 只有一个暗号（IS_REACTIVE）。
+    官方有四个，组成完整的「身份检测协议」—— 读官方源码时第一眼就该找它们：
+  </p>
+  <table>
+    <tr><th>暗号</th><th>问出它等于问</th><th>get 拦截器怎么应答</th></tr>
+    <tr><td><code class="inline">__v_isReactive</code></td><td>你是 reactive 代理吗？</td><td>mutable 系返回 true</td></tr>
+    <tr><td><code class="inline">__v_isReadonly</code></td><td>你是 readonly 代理吗？</td><td>readonly 系返回 true</td></tr>
+    <tr><td><code class="inline">__v_isShallow</code></td><td>你是浅层代理吗？</td><td>shallow 系返回 true</td></tr>
+    <tr><td><code class="inline">__v_raw</code></td><td>把你身后的原始对象还给我</td><td>返回 target 本体 —— <b>toRaw 的实现原理</b>（第 11 章）</td></tr>
+  </table>
+  <p>而四种代理（deep/shallow × mutable/readonly），其实是<b>同一个工厂按两个开关生产出来的</b>：</p>
+  <pre class="code" data-title="官方 baseHandlers.ts 的工厂思想（简化）"><code>function createGetter(isReadonly = false, shallow = false) {
+  return function get(target, key, receiver) {
+    // ① 先应答身份暗号（IS_REACTIVE / IS_READONLY / IS_SHALLOW / RAW）
+    // ② target 是数组 → 走数组专属 instrumentations（重写 includes/push 等，防依赖错乱）
+    // ③ shallow → track 后直接返回 res，不做 reactive(res) 递归
+    // ④ isReadonly → ⭐ 跳过 track（只读数据没人需要订阅它）
+    // ⑤ res 是对象 → isReadonly ? readonly(res) : reactive(res)
+    // ⑥ ref 值要脱壳（isRef(res) &amp;&amp; shallow 为 false 时返回 .value）—— 第 7 章伏笔
+  };
+}
+const mutableHandlers     = { get: createGetter(false, false), set, deleteProperty, has, ownKeys };
+const readonlyHandlers    = { get: createGetter(true,  false), set: 只发警告, deleteProperty: 只发警告, ... };
+const shallowReactiveHandlers     = { get: createGetter(false, true), set, ... };
+const shallowReadonlyHandlers = { get: createGetter(true,  true), ... };
+// ⭐ 四种代理共享同一套拦截骨架，只有开关不同 —— 参数化工厂消灭复制粘贴</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 readonly 为什么不 track？</span><br>
+    track 的意义是「数据变了通知我」。但 readonly 数据<b>永远不会变</b>（set 被拦截，开发模式还会警告），
+    订阅它是一张永不兑现的期货 —— 纯浪费。所以 createGetter(true) 直接跳过 track。
+    「按语义裁剪机制，而不是无脑全开」—— 这是响应式系统克制的教科书案例。
+    同理 <code class="inline">shallowReactive</code> 之所以快（第 11 章），就是开关 ③ 砍掉了整棵子树的代理成本。
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：reactive 原理</summary>
+    <div class="quiz-body">
+      <p>1. <code class="inline">reactive(reactive(obj))</code> 会得到几层代理？<br>
+         2. <code class="inline">proxy.a.b.c</code> 这个表达式总共触发几次 get 拦截、几次 reactive()？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 一层。第二次调用时读取 <code class="inline">IS_REACTIVE</code> 暗号发现已是代理，直接原样返回。<br>
+        2. 3 次 get（a、b、c 各一次）；如果 a、b 是对象，它们各自被 <code class="inline">reactive(res)</code> 转代理 —— 惰性深层就是靠 get 逐步展开的。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="reactive">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#effect"><span class="dir">上一章</span><span class="t">← effect：万物的起点</span></a>
+    <a class="next" href="#track"><span class="dir">下一章</span><span class="t">track：画好「关注名单」→</span></a>
+  </div>
+</section>
+
+<!-- ============ 04 track ============ -->
+<section class="page" id="page-track">
+  <div class="kicker">第 4 章 · 响应式篇</div>
+  <h1>track：画好「关注名单」</h1>
+  <p class="lead">
+    前两章集齐了所有演员：activeEffect 知道「谁在读」，Proxy 拦截器知道「读了谁」。
+    这一章把两者登记到一本花名册上 —— 著名的 WeakMap 套 Map 套 Map。
+    登记完，我们去实验室现场看这本名册怎么长出来的。
+  </p>
+
+  <h2>4.1 需要一本什么样的名册？</h2>
+  <p>先自己推演一下需求。要支持「改 name 时只通知关注 name 的 effect」，名册必须能回答：</p>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox gray">哪个对象？</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">哪个属性？</span>
+      <span class="farrow">→</span>
+      <span class="fbox rose">哪些 effect 在等它？</span>
+    </div>
+    <div class="cap">三层问题，三层 Map。答案就是著名的三层嵌套结构</div>
+  </div>
+
+  <h2>4.2 源码：三层结构的诞生地</h2>
+  <pre class="code" data-title="packages/reactivity/src/reactiveEffect.ts"><code>let targetMap = new WeakMap();          // 第①层：target(原对象) → depsMap
+
+export const createDep = (cleanup, key) => {
+  const dep = new Map() as any;          // 第③层：effect → trackId
+  dep.cleanup = cleanup;                 // dep 清空时，顺手把自己从 Map 里删掉
+  dep.name = key;
+  return dep;
+};
+
+export function track(target, key) {
+  if (!activeEffect) return;             // 没人在读（不在 effect 里）→ 不登记
+
+  let depsMap = targetMap.get(target);   // 第①层：找对象的登记表
+  if (!depsMap) {
+    depsMap = new Map();                 // 第②层：key → dep
+    targetMap.set(target, depsMap);
+  }
+  let dep = depsMap.get(key);
+  if (!dep) {
+    dep = createDep(() => depsMap.delete(key), key);
+    depsMap.set(key, dep);
+  }
+  trackEffect(activeEffect, dep);        // 登记 effect（见下）
+}</code></pre>
+
+  <h3>给每个 dep 起个户号 —— createDep 的巧思</h3>
+  <p>
+    <code class="inline">dep</code> 本体就是个普通 Map（key 是 effect 对象，value 是 trackId），
+    但源码往上面<b>挂了两个属性</b>：<code class="inline">cleanup</code> 和 <code class="inline">name</code>。
+    cleanup 的作用：当 dep 里最后一个 effect 也被清掉时，dep 自动把自己从第②层 Map 里删掉，
+    名册保持干净、不积垃圾。JS 里 Map 也是对象，可以挂自定义属性 —— 一个不太优雅但非常好用的黑科技。
+  </p>
+
+  <h2>4.3 trackEffect：双向奔赴的登记</h2>
+  <pre class="code" data-title="packages/reactivity/src/effect.ts"><code>export function trackEffect(effect, dep) {
+  // 同一个 effect 读同一属性多次 → 只登记一次
+  if (dep.get(effect) !== effect._trackId) {
+    dep.set(effect, effect._trackId);        // dep 记住 effect（正向）
+
+    const oldDep = effect.deps[effect._depsLength];
+    if (oldDep && oldDep !== dep) {
+      cleanDepEffect(oldDep, effect);        // 这个位置上坐着别的 dep → 它过期了
+    }
+    effect.deps[effect._depsLength++] = dep; // effect 记住 dep（反向）
+  }
+}</code></pre>
+  <p>
+    注意「双向记录」：dep 收录 effect 的同时，<b>effect 的 deps 数组也收录 dep</b>。
+    为什么要反向记？—— 为了第 6 章的依赖清理：effect 要能找到「我名下登记过哪些 dep」才能逐一注销。
+    这对正反指针就是官方「增量清理」的地基（3.4 起正版把数组换成了双向链表，第 14 章精读）。
+  </p>
+  <div class="callout tip">
+    <span class="tag">💡 比喻时间：小区门禁</span><br>
+    <b>targetMap</b> = 整个小区的花名册；<b>depsMap</b> = 某栋楼的住户表；
+    <b>dep</b> = 某个门牌号里的「关注这个门的人」名单（住户 + 进门编号 trackId）。
+    track 就是门卫登记：「effect-1（本轮编号 1）关注了 3 号门的 name」。
+  </div>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么最外层是 WeakMap？</span><br>
+    WeakMap 的 key 是<b>弱引用</b>：当原对象在别处被销毁（比如组件卸载），它和整个名册的登记会被垃圾回收器自动带走，
+    不需要手动清理、也不会内存泄漏。如果换成 Map，key 永远被强引用着，对象就永远「阴魂不散」。
+  </div>
+
+  <h2>4.4 🧪 响应式实验室</h2>
+  <p>
+    纸上谈兵结束。下面的实验室里跑着一个<b>真实实现本项目逻辑的响应式引擎</b>（带探针），
+    你将亲眼看着三层名册一步步长出来、看到 track/trigger/cleanup 事件实时发生。
+    先跑前 3 步感受 track，第 5、6 步的精彩留给第 6 章。
+  </p>
+
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 响应式实验室 · 完整版<span class="hint">track / trigger / cleanup 全过程</span></div>
+    <div class="demo-body">
+      <pre class="code" data-title="实验室代码（引擎与项目源码同构）" style="margin-top:0"><code>const state = reactive({ flag: true, name: "张三", age: 18 });
+
+effect(() => {                        // 渲染函数（effect#1）
+  app.textContent = state.flag
+    ? `姓名：${state.name}`            // flag 为 true 时：读 flag + name
+    : `年龄：${state.age}`;            // flag 为 false 时：读 flag + age
+});</code></pre>
+      <div class="step-btns" id="labSteps">
+        <button class="step-btn" data-lab="1">① 运行 effect（flag=true）</button>
+        <button class="step-btn" data-lab="2">② state.name = "李四"</button>
+        <button class="step-btn" data-lab="3">③ state.age = 19（没人看它）</button>
+        <button class="step-btn" data-lab="4">④ state.flag = false（分支切换）</button>
+        <button class="step-btn" data-lab="5">⑤ 再改 name = "王五"</button>
+        <button class="step-btn" data-lab="reset">↺ 重置</button>
+      </div>
+      <div class="demo-grid wide-left">
+        <div class="demo-col">
+          <h4>📜 事件日志</h4>
+          <div class="console" id="labConsole"></div>
+        </div>
+        <div class="demo-col">
+          <h4>🗺️ 依赖地图（实时）</h4>
+          <div class="depmap" id="labMap"></div>
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat" id="labView"><div class="v">—</div><div class="k">页面显示</div></div>
+        <div class="stat" id="labRuns"><div class="v">0</div><div class="k">effect 执行次数</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--dim);margin-bottom:0" id="labTip">
+        提示：按顺序点击 ①→⑤，观察右侧「依赖地图」如何生长、又如何瘦身。
+      </p>
+    </div>
+  </div>
+
+  <h2>4.5 一次读取的完整时序：从 <code class="inline">state.name</code> 到 dep.set</h2>
+  <p>把第 2、3、4 章的零件串成一条完整时间线，每一步标注它动用了哪个零件：</p>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">① effect 内执行 state.name</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">② Proxy get 拦截</span>
+        <span class="farrow">→</span>
+        <span class="fbox">③ IS_REACTIVE 暗号检查（放行）</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">④ track(target, 'name')</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">⑤ activeEffect 有主吗？无主直接返回</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">⑥ 两层 Map 查找 / 建档（createDep）</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">⑦ trackEffect：版本号比对 → dep.set(effect, _trackId)</span>
+        <span class="farrow">＋</span>
+        <span class="fbox rose">⑧ effect.deps[_depsLength++] = dep（反向登记）</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">⑨ Reflect.get 取值返回</span>
+      </div>
+    </div>
+    <div class="cap">9 步里只有 ⑥⑦⑧ 是「收集」本身，其余都是拦截与取值的常规流程 —— 收集是搭车，不是专程</div>
+  </div>
+  <p>
+    值得回味的是 ⑤：<code class="inline">track</code> 的第一个动作就是检查
+    <code class="inline">activeEffect</code>。这意味着<b>收集机制的前提是「有人正在被追踪」</b>——
+    这就是为什么 effect 外的读取、异步回调里的读取（指针已还原）都不会产生任何登记。
+    很多「数据变了页面不动」的 bug，根子都在这第 ⑤ 步。
+  </p>
+
+  <h2>4.6 名册的性能账本：依赖收集到底有多便宜？</h2>
+  <p>很多人担心「每次读属性都要收集依赖，会不会很慢？」算一笔账：</p>
+  <table>
+    <tr><th>场景</th><th>track 的开销</th><th>说明</th></tr>
+    <tr><td>effect 外的读取</td><td><b>O(1)，一次布尔判断</b></td><td><code class="inline">if (!activeEffect) return</code> 第一步就走了 —— 系统外的读取几乎零成本</td></tr>
+    <tr><td>effect 内重复读同一属性</td><td>O(1)，一次 Map.get 比对</td><td><code class="inline">dep.get(effect) !== _trackId</code> 发现是本轮登记，直接跳过</td></tr>
+    <tr><td>effect 内首次读某属性</td><td>两次 Map 查找 + 一次 Map.set + 一次数组写入</td><td>真正的登记，每个属性每轮只发生一次</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 设计精髓：把贵的动作挪到便宜的路径之外</span><br>
+    响应式的开销大头从不在「读」，而在「变更后的重跑」。整个 track 体系都在贯彻
+    「读时便宜、变时准」：登记动作平时无感，但每条登记都有账可查、可注销。
+    这与第 30 章编译优化（静态提升 / patchFlag）的哲学一脉相承 ——
+    <b>顶尖的性能不是把每一步做快，而是让大多数步骤根本不用做。</b>
+  </div>
+
+  <!-- ======= INSERT: 4.7 心跳分步推演实验室 ======= -->
+  <h2>4.7 🧪 心跳分步推演实验室：看内部结构一步步长出来</h2>
+  <p>
+    上面是「纸上推演」，这里把它变成「可暂停的动画」—— <b>点一下走一步</b>，
+    亲眼看着 <code class="inline">_trackId</code> 怎么自增、写指针怎么归零再前进、deps 数组怎么长出来、
+    名册怎么在分支切换时瘦身。全部内部结构实时可见，一步一停，看懂再走。
+  </p>
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 心跳分步推演实验室<span class="hint">effect#1：view = flag ? name : age · 内部结构全透明</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="hbSteps">
+        <button class="step-btn" data-hb="next">▶ 下一步</button>
+        <button class="step-btn" data-hb="auto">⏩ 自动播放</button>
+        <button class="step-btn" data-hb="reset">↺ 重置</button>
+      </div>
+      <div class="demo-grid wide-left">
+        <div class="demo-col">
+          <h4>📜 分步解说</h4>
+          <div class="console" id="hbConsole" style="height:330px"></div>
+        </div>
+        <div class="demo-col">
+          <h4>🫀 effect#1 内部（实时）</h4>
+          <div class="dw-panel" id="hbEffect"></div>
+          <h4 style="margin-top:12px">🗂 名册 targetMap（实时）</h4>
+          <div class="dw-panel" id="hbMap"></div>
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat" id="hbTrackId"><div class="v">—</div><div class="k">_trackId（场次号）</div></div>
+        <div class="stat" id="hbDepsLen"><div class="v">—</div><div class="k">_depsLength（写指针）</div></div>
+        <div class="stat" id="hbDirty"><div class="v">—</div><div class="k">脏标记</div></div>
+        <div class="stat" id="hbStep"><div class="v">0 / 11</div><div class="k">推演进度</div></div>
+      </div>
+      <p style="font-size:14px;color:var(--dim);margin-bottom:0" id="hbTip">
+        提示：连点「下一步」。重点盯三处 —— 版本号何时 +1、写指针何时归零、第 ⑨ 步写指针位置上「坐着谁」。
+      </p>
+    </div>
+  </div>
+
+
+<details class="quiz">
+    <summary>自测一下：track 机制</summary>
+    <div class="quiz-body">
+      <p>1. 在 effect 外随便读 <code class="inline">state.name</code>，名册会有变化吗？<br>
+         2. 同一个 effect 里读两次 <code class="inline">state.name</code>，dep 里会有两个记录吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 不会。track 开头有 <code class="inline">if (!activeEffect) return</code> —— 不在 effect 上下文里的读取等于白读，这正是「依赖必须写在 effect/computed/watch 里才生效」的根本原因。<br>
+        2. 不会。dep 里同一条登记只有一份（Map 的 key 唯一），trackEffect 用 <code class="inline">dep.get(effect) !== effect._trackId</code> 判断「本轮已登记过」直接跳过。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="track">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#reactive"><span class="dir">上一章</span><span class="t">← reactive：Proxy 的魔法</span></a>
+    <a class="next" href="#trigger"><span class="dir">下一章</span><span class="t">trigger：一呼百应 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 05 trigger ============ -->
+<section class="page" id="page-trigger">
+  <div class="kicker">第 5 章 · 响应式篇</div>
+  <h1>trigger：一呼百应</h1>
+  <p class="lead">
+    登记完成，就等数据变化的那一刻。set 拦截器发现值变了，trigger 就拿着名册挨家挨户敲门。
+    这一章很短，但有两个值钱的细节：值的比较，和「调度」的萌芽。
+  </p>
+
+  <h2>5.1 源码：从 set 到 effect 重跑的完整链路</h2>
+  <pre class="code" data-title="packages/reactivity/src/reactiveEffect.ts + effect.ts"><code>// baseHandler.ts 的 set 拦截器里：
+set(target, key, value, receiver) {
+  let oldValue = target[key];
+  let result = Reflect.set(target, key, value, receiver);
+  if (oldValue !== value) {                 // ⭐ 值没变就不折腾
+    trigger(target, key, value, oldValue);
+  }
+  return result;
+}
+
+// reactiveEffect.ts：
+export function trigger(target, key, newValue, oldValue) {
+  const depsMap = targetMap.get(target);    // 顺着名册找：对象 →
+  if (!depsMap) return;                     //   （没人登记过，直接回家）
+  const dep = depsMap.get(key);             //   → 属性 →
+  if (!dep) return;
+  triggerEffects(dep);                      //   → effect 们
+}
+
+// effect.ts：
+export function triggerEffects(dep) {
+  for (const effect of dep.keys()) {
+    if (effect._dirtyLevel &lt; DirtyLevels.Dirty) {
+      effect._dirtyLevel = DirtyLevels.Dirty;   // 给 computed 用的脏标记（第 8 章）
+    }
+    if (effect._running === 0) {                // ⭐ 正在运行的自己不触发（防死循环）
+      if (effect.scheduler) {
+        effect.scheduler();                     // 有调度器走调度器
+      }
+    }
+  }
+}</code></pre>
+
+  
+  <div class="callout tip">
+    <span class="tag">🎨 一分钟比喻：trigger 是广播站站长</span><br>
+    数据一变，站长做三件事：① 翻名册找到「订阅了这个属性的人」（dep 查找，O(1)）；
+    ② 给每个人打电话 —— 但<b>通话内容按身份定制</b>：渲染 effect 听到「重跑」，
+    computed 听到「缓存过期了」，watch 听到「该执行用户回调了」（scheduler 三种性格，见下表）；<br>
+    ③ 没人订阅？站长看一眼名册就下班 —— <b>一次广播的固定成本只有两次 Map 查找</b>。
+    「响应式很快」的秘诀不是通知得快，而是<b>没必要的通知根本不发生</b>。
+  </div>
+
+  <h2>5.2 细节一：<code class="inline">oldValue !== value</code> 的坑</h2>
+  <p>
+    项目源码用的是 <code class="inline">!==</code>。思考题：给 name 赋值 <code class="inline">NaN</code> 两次会怎样？
+  </p>
+  <pre class="code" data-title="一个教科书级的历史悬案"><code>NaN === NaN      // false ！（NaN 不等于任何值，包括自己）
+NaN !== NaN      // true
+
+state.name = NaN;   // oldValue="张三" !== NaN → 触发 ✓
+state.name = NaN;   // NaN !== NaN 恒为 true → 又触发了！✗（其实值没变）</code></pre>
+  <p>
+    官方 Vue 源码用的是 <code class="inline">!Object.is(oldValue, newValue)</code>，
+    因为 <code class="inline">Object.is(NaN, NaN) === true</code>，能正确识别「NaN 没变化」。
+    差一个字符的严谨性，就是「能跑」和「正确」的距离。
+  </p>
+
+  <h2>5.3 细节二：<code class="inline">_running</code> 防自杀循环</h2>
+  <pre class="code" data-title="危险代码"><code>effect(() => {
+  state.count = state.count + 1;   // 读了 count，又写了 count
+});
+// 若无保护：跑 effect → 读 count（登记）→ 写 count（trigger 自己）→
+//          重跑 effect → 写 count → 重跑 effect → …… 栈溢出 💥</code></pre>
+  <p>
+    run() 执行 fn 前会 <code class="inline">_running++</code>，triggerEffects 里检查
+    <code class="inline">effect._running === 0</code> 才允许触发 ——
+    <b>自己触发自己的那一下会被吞掉</b>，死循环斩断。
+  </p>
+
+  <h2>5.4 细节三：scheduler —— 一颗埋好的种子</h2>
+  <p>
+    注意 triggerEffects 并不直接 <code class="inline">effect.run()</code>，而是调
+    <code class="inline">effect.scheduler()</code>。默认 scheduler 等价于直接重跑（见第 2 章 effect 函数），
+    但 computed 和 watch 会传入自己的版本：
+  </p>
+  <table>
+    <tr><th>API</th><th>自己的 scheduler</th><th>效果</th></tr>
+    <tr><td>effect（默认）</td><td><code class="inline">_effect.run()</code></td><td>数据一变立刻重跑</td></tr>
+    <tr><td>computed</td><td>只把自己标脏 + 通知下游</td><td>不着急算，等下次有人读</td></tr>
+    <tr><td>watch</td><td>调用用户的回调 cb</td><td>执行的是「你的代码」而不是 getter</td></tr>
+  </table>
+  <p>同一个引擎，靠注入不同的 scheduler 长出三种性格 —— 这就是第 2 章说的「可注入调度器」的价值。</p>
+
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox">state.name = "李四"</span>
+      <span class="farrow">→</span>
+      <span class="fbox gray">set 拦截</span>
+      <span class="farrow">→</span>
+      <span class="fbox gray">值变了吗？</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">trigger</span>
+      <span class="farrow">→</span>
+      <span class="fbox gray">查名册</span>
+      <span class="farrow">→</span>
+      <span class="fbox rose">scheduler()</span>
+      <span class="farrow">→</span>
+      <span class="fbox">重跑 / 标脏 / 回调</span>
+    </div>
+    <div class="cap">一次赋值背后的九连环。实验室里每点一次按钮，走的就是这条链</div>
+  </div>
+
+  <h2>5.5 官方 trigger 的另一半：新增、删除、数组与迭代</h2>
+  <p>
+    本项目的 trigger 只处理「改已有属性的值」一种情况。官方还要回答三个更难的问题 ——
+    它们是面试「原理详述」的加分区：
+  </p>
+  <table>
+    <tr><th>操作</th><th>难点</th><th>官方方案</th></tr>
+    <tr><td>新增属性 <code class="inline">obj.k = 1</code></td><td>k 之前没有 dep，通知谁？</td><td>操作类型标记 <b>ADD</b>：额外触发 <b>ITERATE_KEY</b> 的 dep（for...in 依赖它）</td></tr>
+    <tr><td>删除属性 <code class="inline">delete obj.k</code></td><td>值变了？没有 newValue 可比</td><td>操作类型 <b>DELETE</b>：触发 key 自己的 dep + ITERATE_KEY 的 dep</td></tr>
+    <tr><td>数组 <code class="inline">arr.push(9)</code></td><td>push 内部先读 length 再写 length，读写交织</td><td>改 <b>length</b> 时，把「下标 ≥ 新 length」的已登记元素一并触发；另外重写 push/pop/includes 等<b>方法拦截器</b>，避免依赖错乱</td></tr>
+  </table>
+  <pre class="code" data-title="官方 3.5 trigger 的入口（dep.ts，简化）"><code>export function trigger(target, type, key, newValue, oldValue) {
+  const depsMap = targetMap.get(target);
+  if (!depsMap) {
+    globalVersion++;             // 没人登记过 → 只动全局账本号
+    return;
+  }
+  const run = (dep) => dep &amp;&amp; dep.trigger();   // ⭐ dep.trigger = version++ → notify
+  startBatch();                                // 3.5 起：本次触发的全过程包在一个 batch 里
+  if (type === TriggerOpTypes.CLEAR) {
+    depsMap.forEach(run);                      // 集合 clear：全体通知
+  } else if (isArray(target) &amp;&amp; key === 'length') {
+    // ① 数组 length 变短 → 被截掉的元素也要通知
+    const newLength = Number(newValue);
+    depsMap.forEach((dep, dk) => {
+      if (
+        dk === 'length' || dk === ARRAY_ITERATE_KEY ||
+        (!isSymbol(dk) &amp;&amp; dk >= newLength)
+      ) run(dep);
+    });
+  } else {
+    // ② key 自己的 dep（新增时可能不存在，存不存在都 run，undefined 会被过滤）
+    if (key !== void 0 || depsMap.has(void 0)) run(depsMap.get(key));
+    if (isArrayIndex) run(depsMap.get(ARRAY_ITERATE_KEY));  // ③ 下标变化 → 数组迭代依赖
+    switch (type) {
+      case TriggerOpTypes.ADD:                 // ④ 新增属性
+        if (!isArray(target)) {
+          run(depsMap.get(ITERATE_KEY));       //   for...in 要知道
+          if (isMap(target)) run(depsMap.get(MAP_KEY_ITERATE_KEY));
+        } else {
+          run(depsMap.get('length'));          //   新增下标 → length 也变
+        }
+        break;
+      case TriggerOpTypes.DELETE:              // ⑤ 删除属性
+        if (!isArray(target)) run(depsMap.get(ITERATE_KEY));
+        break;
+      case TriggerOpTypes.SET: break;          // ⑥ 普通赋值：只通知 key 自己
+    }
+  }
+  endBatch();
+}</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 ITERATE_KEY 是个什么哨兵？</span><br>
+    你写 <code class="inline">for (const k in obj)</code> 时，Proxy 的 <b>ownKeys</b> 拦截器触发 ——
+    但 ownKeys 没有「具体 key」可登记。官方就用一个 <b>Symbol 哨兵</b>（ITERATE_KEY）充当属性名。
+    对象增删属性必然改变「迭代结果」，所以增删时必须顺带触发它的 dep。
+    面试问「for...in 为什么也能响应式」，答案就是这个哨兵。
+  </div>
+
+  <h2>5.6 官方 3.5 的通知管线：先收集，后执行</h2>
+  <pre class="code" data-title="官方 3.5 dep.ts / effect.ts（节选）"><code>// dep.trigger() 的完整故事：
+trigger(debugInfo?) {
+  this.version++;        // ① 自己的账本 +1（下游 isDirty 靠它对账）
+  globalVersion++;       // ② 全局账本 +1（computed 的快路径）
+  this.notify(debugInfo);
+}
+notify(debugInfo?) {
+  startBatch();          // ③ 批次开始（batchDepth 计数，支持嵌套）
+  for (let link = this.subs; link; link = link.prevSub) {
+    if (link.sub.notify()) {                       // ④ 只「登记」每个订阅者，不执行！
+      (link.sub as ComputedRefImpl).dep.notify();  //   返回 true 说明是 computed → 继续传播
+    }
+  }
+  endBatch();            // ⑤ 批次结束 → 统一按顺序执行所有被登记的 effect
+}</code></pre>
+  <p>
+    注意 ④⑤ 的分工：遍历名册期间<b>只把订阅者挂进一条临时队列</b>
+    （<code class="inline">batch()</code> 借用 <code class="inline">sub.next</code> 指针把订阅者串成链表），
+    等整本名册走完、<code class="inline">endBatch()</code> 才逐个 <code class="inline">trigger()</code> 执行。
+    为什么不边遍历边执行？因为 effect 执行本身会读/写响应式数据，甚至回头增删
+    <b>正在遍历的这条名册</b> —— 边走边改名单，后面的人就会漏掉或重复。
+    <b>先全体登记、再统一执行</b>，遍历期间名册结构稳定。
+  </p>
+  <div class="callout deep">
+    <span class="tag">🧠 本项目为什么敢边遍历边执行？</span><br>
+    本项目的 computed scheduler 只做两件事：把自己标脏 + triggerRefValue 通知下游 ——
+    绝不在循环内同步求值（求值被推迟到「下次有人读 .value」，第 8 章）。
+    危险边界已经被设计挡住了，所以一遍循环也安全。<b>简化不是偷懒，是想清楚了边界之后的裁剪</b> ——
+    这也是读「教学版源码」的正确姿势：看到简化，去官方找它省掉了什么。
+  </div>
+
+  
+  <h2>5.7 Set/Map 的响应式：另一套拦截器（collectionHandlers）</h2>
+  <p>
+    到这里为止，track/trigger 都建立在「读写属性会被 get/set 拦截」上。
+    但 Map / Set 压根不这么工作：<code class="inline">map.set(k, v)</code> 是<b>方法调用</b>，
+    不是属性赋值 —— Proxy 的 set 拦截器根本不触发。第 12 章「放进 Set/Map 响应式消失」的病根就在这：
+  </p>
+  <pre class="code" data-title="问题的本质"><code>const m = reactive(new Map());
+m.set("a", 1);   // 读 m.set（get 拦截：拿到一个函数）→ 再调用它
+//                ⚠️ set 拦截器全程没参与 —— track/trigger 一个都没发生</code></pre>
+  <p>官方解法：<b>get 拦截时认出集合，返回「重写过的方法」</b>，把 track/trigger 手动埋进方法体：</p>
+  <pre class="code" data-title="collectionHandlers 的思想（源码级简化）"><code>function createInstrumentations() {
+  const inst = {};
+  // 重写「读方法」：方法体里手动 track
+  ["get", "has", "forEach", "keys", "values", "entries"].forEach(key =&gt; {
+    inst[key] = function (...args) {
+      track(target, ITERATE_KEY);              // 迭代类依赖 ITERATE_KEY 哨兵（5.5）
+      return Reflect.get(target, key, ...args); // 注意 this 必须是原始 target！
+    };
+  });
+  // size 是 accessor 不是方法，要用 getOwnPropertyDescriptor 特殊取 —— 源码里那段"怪代码"就是干这个
+  // 重写「写方法」：方法体里手动 trigger
+  ["set", "add", "delete", "clear"].forEach(key =&gt; {
+    inst[key] = function (...args) {
+      const had = target.has(args[0]);
+      const res = target[key](...args);        // 先真正执行
+      if (!had) trigger(target, ITERATE_KEY);  // 新增 → ADD + 迭代依赖
+      else trigger(target, key);               // SET / DELETE
+      return res;
+    };
+  });
+  return inst;
+}
+// baseHandlers 的 get 开头加一条：
+if (isCollection(target) &amp;&amp; hasOwn(inst, key)) {
+  track(target, key);
+  return Reflect.get(inst, key);   // ⭐ 返回重写版方法（不是原始方法）
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 两个值得咀嚼的细节</span><br>
+    ① 集合方法的 this 必须是<b>原始 target</b> —— Map 的内部槽位不认代理，所以这里故意<b>不</b>把 receiver
+    转发进去。和 3.4「必须用 receiver」正好相反：万事万物看场景，没有放之四海皆准的写法。<br>
+    ② <code class="inline">map.get(k)</code> 拿到的如果是对象，官方还会包一层 reactive —— 集合的「深响应」在方法返回值里补齐。
+  </div>
+  <p>
+    本项目没实现集合拦截器 —— 这是「朝圣作业」里性价比最高的一题：把 5.7 的骨架补进 baseHandler.ts，
+    官方 reactivity 的最后一块拼图就齐了。
+  </p>
+
+<details class="quiz">
+    <summary>自测一下：trigger 机制</summary>
+    <div class="quiz-body">
+      <p>1. 改一个<b>没人读</b>的属性，会触发什么？开销在哪一步终止？<br>
+         2. 为什么 triggerEffects 先标 dirtyLevel 再判断 _running？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. trigger 里 <code class="inline">depsMap.get(key)</code> 找不到 dep（或 dep 空）直接 return —— 开销止于两次 Map 查找，非常便宜。这也是响应式「按需通知」的效率来源。<br>
+        2. 两个动作服务两类需求：标脏是给 computed 的「记账」（哪怕这次不执行，账也要记下）；_running 拦的是「执行」这个动作。记账不花钱，执行才花钱。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="trigger">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#track"><span class="dir">上一章</span><span class="t">← track：画好「关注名单」</span></a>
+    <a class="next" href="#cleanup"><span class="dir">下一章</span><span class="t">依赖清理：分支切换之谜 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 06 cleanup ============ -->
+<section class="page" id="page-cleanup">
+  <div class="kicker">第 6 章 · 响应式篇</div>
+  <h1>依赖清理：分支切换之谜</h1>
+  <p class="lead">
+    这是整个 reactivity 里最烧脑、也最有含金量的一章 —— 从 3.4 开始，官方用「增量清理」
+    替换了沿用多年的「全删重建」方案（先有「版本号 + 双指针」，3.5 起演进为「双向链表 + 版本计数」）。
+    看懂它，你就超过了 90% 的「Vue 使用者」。别怕，我们有一整个动画实验室帮你。
+  </p>
+
+  <h2>6.1 问题：分支切换会让依赖「过期」</h2>
+  <pre class="code" data-title="经典场景"><code>effect(() => {
+  app.textContent = state.flag
+    ? state.name      // flag=true：本轮只登记 flag、name
+    : state.age;      // flag=false：本轮只登记 flag、age
+});</code></pre>
+  <p>推演一遍：</p>
+  <ol>
+    <li>flag 为 true，effect 跑完，名册里：<code class="inline">flag → [effect]</code>、<code class="inline">name → [effect]</code></li>
+    <li>有人把 flag 改成 false → effect 重跑 → 这次只读 flag 和 age</li>
+    <li>问题来了：名册里 <code class="inline">name → [effect]</code> 这条记录<b>过期了</b>！
+      现在页面显示的是 age，name 已经和我无关</li>
+    <li>如果不清理：以后每次改 name（哪怕一万次），effect 都会白白重跑 → <b>性能浪费 + 逻辑错误</b></li>
+  </ol>
+
+  <h2>6.2 老方案（Vue 3.0~3.3）：全删重建</h2>
+  <p>
+    老版本的思路很朴素：每次 effect 重跑<b>之前</b>，把它 deps 里登记的所有 dep 全部清空，跑完重新收集。
+    正确性没问题，但代价是：哪怕依赖一点没变（绝大多数情况），也要做一轮「全部删除 + 全部登记」的无用功。
+  </p>
+
+  <h2>6.3 新方案（本项目教学版）：版本号 + 双指针 diff</h2>
+  <p>核心思想一句话：<b>「本轮收集完，和上一轮比一比，只删多出来的」</b> —— 像极了虚拟 DOM 的 diff。三个角色：</p>
+  <table>
+    <tr><th>角色</th><th>作用</th></tr>
+    <tr><td><code class="inline">_trackId</code>（版本号）</td><td>每 run 一次就 +1。dep 里记录的「上次登记时的版本号」不等于当前版本 → 说明这条登记不是本轮写的</td></tr>
+    <tr><td><code class="inline">_depsLength</code>（写指针）</td><td>本轮新登记写到了 effect.deps 的第几个位置</td></tr>
+    <tr><td><code class="inline">effect.deps</code>（登记簿）</td><td>effect 反向记录自己登记过的所有 dep（第 4 章埋的伏笔）</td></tr>
+  </table>
+
+  <h3>三步走源码</h3>
+  <pre class="code" data-title="packages/reactivity/src/effect.ts"><code>// ① run() 开头：本轮收集开始
+function preCleanEffect(effect) {
+  effect._depsLength = 0;   // 写指针归零：本轮从头登记
+  effect._trackId++;        // 版本号 +1：旧记录全部「作废」
+}
+
+// ② trackEffect 里：登记即 diff
+function trackEffect(effect, dep) {
+  if (dep.get(effect) !== effect._trackId) {     // 不是本轮登记的？
+    dep.set(effect, effect._trackId);            //   → 写入本轮版本号
+    const oldDep = effect.deps[effect._depsLength];
+    if (oldDep && oldDep !== dep) {
+      cleanDepEffect(oldDep, effect);            //   → 写指针位置上还坐着旧 dep？它过期了，删！
+    }
+    effect.deps[effect._depsLength++] = dep;     // 写入新 dep，指针 +1
+  }
+}
+
+// ③ run() 结尾：清尾巴
+function postCleanEffect(effect) {
+  if (effect.deps.length > effect._depsLength) { // 登记簿比本轮写到的位置长？
+    for (let i = effect._depsLength; i &lt; effect.deps.length; i++) {
+      cleanDepEffect(effect.deps[i], effect);    //   → 多出来的全是过期依赖，逐一注销
+    }
+    effect.deps.length = effect._depsLength;     //   → 登记簿截断
+  }
+}
+
+function cleanDepEffect(dep, effect) {
+  dep.delete(effect);          // 从 dep 里删除登记
+  if (dep.size === 0) {
+    dep.cleanup();             // dep 空了 → 把自己从 depsMap 里也删掉（第 4 章的 cleanup 闭包）
+  }
+}</code></pre>
+
+  
+  <div class="callout tip">
+    <span class="tag">🎨 一分钟比喻：景点门票与场次号</span><br>
+    把 effect 的每一轮 run 想成「开放一个新场次」：<code class="inline">_trackId++</code> 就是场次号；
+    dep 名册里记的不是「谁」，而是「<b>谁在哪一场登记过</b>」。检票员（trackEffect）看到旧场次的票，
+    撕掉、当场补发新场次的票；闭园清点（postCleanEffect）时，手里还攥着旧票的成员直接请出名册 ——
+    <b>清场逻辑零特判：只认场次号，不认人情。</b>
+  </div>
+
+  <h3>双指针逐格推演：同一例子的内部账本</h3>
+  <table>
+    <tr><th>轮次</th><th>trackId</th><th>本轮读到</th><th>写指针动作</th><th>effect.deps</th><th>名册变化</th></tr>
+    <tr><td>第 1 轮</td><td>1</td><td>flag、name</td><td>0 → 1 → 2</td><td>[flag, name]</td><td>两处各登记 e1@1</td></tr>
+    <tr><td>第 2 轮开始</td><td><b>2</b></td><td>—</td><td><b>归零 = 0</b>（数组不动）</td><td>[flag, name]</td><td>旧登记瞬间变「过期票」</td></tr>
+    <tr><td>读 flag</td><td>2</td><td>flag</td><td>票是旧场次 → 撕掉补新票；0 → 1</td><td>[flag, name]</td><td>flag 更新为 e1@2</td></tr>
+    <tr><td>分支切换！读 age</td><td>2</td><td>age</td><td><b>写位 1 坐着 dep·name → 清掉它</b>；1 → 2</td><td>[flag, age]</td><td>age 登记 e1@2；name 注销自清理</td></tr>
+    <tr><td>收尾</td><td>2</td><td>—</td><td>postClean：length(2) ≤ 指针(2)，无尾巴</td><td>[flag, age]</td><td>—</td></tr>
+    <tr><td>验证</td><td>—</td><td>改 name</td><td>trigger 查名册：空</td><td>—</td><td><b>静默返回 ✓</b></td></tr>
+  </table>
+  <p>
+    看第 4 行 —— 「清理」不是事后补救，而是<b>写指针撞见旧邻居的当下顺手完成的</b>。
+    这就是「登记即 diff」：大多数轮次里清理成本为零，只有分支真的变了才多撕一张票。
+    想亲手拨一遍指针？4.7 的心跳实验室第 ⑧ 步就是这一行。
+  </p>
+
+  <h3>走一遍完整流程（flag: true → false）</h3>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div>
+        <div style="font-weight:700;font-size:15.5px;color:var(--green-d);margin-bottom:6px">第 1 轮（flag=true）：depsLength=2</div>
+        <div class="flow">
+          <span class="fbox">deps: [dep·flag, dep·name]</span>
+          <span class="farrow">✓</span>
+          <span class="fbox gray">本轮读了 flag、name</span>
+        </div>
+      </div>
+      <div>
+        <div style="font-weight:700;font-size:15.5px;color:var(--rose);margin-bottom:6px">第 2 轮（flag=false）：depsLength=2，但内容变了！</div>
+        <div class="flow">
+          <span class="fbox">deps: [dep·flag, dep·age]</span>
+          <span class="farrow">→</span>
+          <span class="fbox gray">本轮只读了 flag、age</span>
+        </div>
+        <div class="flow" style="margin-top:8px">
+          <span class="fbox gray">写指针走到 index=1 时</span>
+          <span class="farrow">发现</span>
+          <span class="fbox rose">oldDep = dep·name ≠ dep·age</span>
+          <span class="farrow">→</span>
+          <span class="fbox rose">注销 dep·name 💥</span>
+        </div>
+      </div>
+    </div>
+    <div class="cap">登记簿像一个正在原地翻新的书架：新书从左往右放，放的时候发现架上有旧书挡道就扔掉；最后把书架右边多余的旧书全部清空</div>
+  </div>
+
+  <div class="callout deep">
+    <span class="tag">🧠 为什么说这是「diff」？</span><br>
+    源码注释里作者自己写道："这块做个类似 diff 的比较"。
+    老方案是「销毁重建」，新方案是「原地复用 + 增量更新」—— 和虚拟 DOM diff 的哲学完全一致。
+    <b>好框架的品味是相通的：能不动的，绝不动。</b>
+  </div>
+
+  <h2>6.4 回到实验室，见证清理现场</h2>
+  <p>
+    回到第 4 章的实验室（<a href="#track">点这里直达</a>），
+    这次重点走 <b>④⑤ 两步</b>：点 ④ 切换 flag 后，看「依赖地图」里 name 名册的注销过程（橙色 [cleanup] 日志）；
+    再点 ⑤ 改 name —— 页面纹丝不动，因为关注者名单已经空了。
+    这两步是整个响应式系统最精彩的一幕，别错过。
+  </p>
+
+  <h2>6.5 官方 3.5 的「正版」结构：双向链表 + 版本计数</h2>
+  <p>
+    前面的「版本号 + 双指针」是本项目对「增量清理」思想的教学实现。官方 3.5 的正版用<b>双向链表</b>组织一切 ——
+    dep 与 effect（订阅者）之间的每条登记线都是一个 <code class="inline">Link</code> 节点，
+    同时挂在两条双向链上；版本号就从「档位」升级成了「对账依据」：
+  </p>
+  <pre class="code" data-title="官方 dep.ts / effect.ts（3.5，节选）"><code>export class Link {
+  sub: Subscriber;             // 这条线连着哪个订阅者（effect 或 computed）
+  dep: Dep;                    //   以及哪个 dep
+  version: number;             // ⭐ 登记时快照的 dep.version —— 去重 + 对账（= 本项目 trackId）
+  nextDep?: Link;  prevDep?: Link;      // effect 侧双向链（= 本项目 effect.deps 数组）
+  nextSub?: Link;  prevSub?: Link;      // dep 侧双向链（订阅者名单）
+  prevActiveLink?: Link;       // Link 复用时的暂存位
+}
+
+export class Dep {
+  version = 0;                 // 每次 trigger +1（对账依据）
+  subs?: Link;                 // 订阅者链的「尾」（notify 从尾向头遍历）
+  activeLink?: Link;           // 当前正在 track 本 dep 的那条线
+  map?: KeyToDepMap;           // 回指所属名册 ┐ 订阅者归零时自动销户：
+  key?: unknown;               // 回指自己的属性名 ┘ removeSub 里 map.delete(key)
+  sc: number = 0;              // 订阅者计数（subscriber count）
+}</code></pre>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox blue">dep.subs</span>
+      <span class="farrow">⇄</span>
+      <span class="fbox">Link(effect#1)</span>
+      <span class="farrow">⇄</span>
+      <span class="fbox">Link(effect#2)</span>
+      <span class="farrow">⇄</span>
+      <span class="fbox gray">Link(effect#3) = subsTail</span>
+    </div>
+    <div class="cap">清理过期 effect：从 link 摘除只需 prev.next = next、next.prev = prev —— 两次赋值，无遍历</div>
+  </div>
+  <table>
+    <tr><th>维度</th><th>本项目：Map + 数组 + 双指针</th><th>官方 3.5：双向链表 + 版本计数</th></tr>
+    <tr><td>登记去重</td><td><code class="inline">dep.get(effect) !== _trackId</code></td><td><code class="inline">link.version</code> 快照对账 —— 同一个思想</td></tr>
+    <tr><td>增量清理</td><td>从 _depsLength 起遍历数组尾巴</td><td>run 前 <code class="inline">prepareDeps</code> 把旧线 version 置 -1，跑完后 <code class="inline">cleanupDeps</code> 沿链摘除仍是 -1 的节点</td></tr>
+    <tr><td>过期判定</td><td>登记簿长度 &gt; 写指针位置</td><td><code class="inline">isDirty</code> 逐条比对 <code class="inline">link.dep.version !== link.version</code></td></tr>
+    <tr><td>内存形态</td><td>Map + 数组（有容量冗余）</td><td>每条线一个小对象，指针即数据，最省</td></tr>
+    <tr><td>可读性</td><td>⭐ 更适合教学：全是熟脸数据结构</td><td>指针穿针，读起来烧脑</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 两个方案是同一个思想的两种身体</span><br>
+    版本号去重（trackId）、增量清理（只删过期的）、双向记账（dep ↔ effect 互存指针）——
+    三条灵魂完全一致，差别只在「登记簿用 Map + 数组还是链表」。
+    这正是读源码的正确姿势：<b>先抓思想，再看数据结构</b>。数据结构是思想的载体，
+    换个载体，思想不变 —— 你现在同时握着「看懂教学版」和「看懂官方版」的两把钥匙。
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：依赖清理</summary>
+    <div class="quiz-body">
+      <p>1. 老方案（全删重建）错在哪？新方案凭什么更快？<br>
+         2. <code class="inline">trackId</code> 和 <code class="inline">_depsLength</code> 各自解决什么问题？缺一个行吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 老方案在「依赖完全没变」时也要做 N 次删除 + N 次登记；新方案只在依赖<b>真的变化</b>时才动手，且采用原地复用。<br>
+        2. trackId 解决「重复登记去重」（同轮同属性只记一次）；_depsLength 解决「过期依赖定位」（知道写到哪、超出部分是垃圾）。缺 trackId 会重复登记；缺 depsLength 无法增量清理，两者缺一不可。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="cleanup">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#trigger"><span class="dir">上一章</span><span class="t">← trigger：一呼百应</span></a>
+    <a class="next" href="advanced.html#ref"><span class="dir">下一章</span><span class="t">ref：给原始值一个家 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+<script src="assets/labs/common.js?v=1"></script>
+<script src="assets/labs/reactivity.js?v=1"></script>
+</body>
+</html>

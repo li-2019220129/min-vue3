@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 组件与调度篇</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 21 startflow ============ -->
+<section class="page" id="page-startflow">
+  <div class="kicker">第 21 章 · 组件与调度篇</div>
+  <h1>启动全流程：从 createApp 到第一个像素</h1>
+  <p class="lead">
+    前面 16 章，你把所有零件都拆开看过了：effect、Proxy、track/trigger、diff、组件实例……
+    但零件不等于整车。本章回答一个终极问题：<b>当你写下 createApp(App).mount('#app')，
+    到页面上出现第一个像素，中间到底发生了什么？</b>一条调用链，串起全书所有章节 ——
+    官方源码入口在 <code class="inline">runtime-core/src/apiCreateApp.ts</code>。
+  </p>
+
+  <h2>21.1 createApp：工厂里的工厂</h2>
+  <p>
+    <code class="inline">createApp</code> 不是普通函数，它是「工厂里的工厂」：
+    外层 <code class="inline">createAppAPI(render)</code> 接收渲染器，内层才创建 app 对象。
+    官方源码里这个结构一眼可见：
+  </p>
+  <pre class="code" data-title="官方结构（简化自 apiCreateApp.ts）"><code>export function createAppAPI(render, hydrate) {
+  return function createApp(rootComponent, rootProps = null) {
+    const app = {
+      _component: rootComponent,      // 根组件
+      _props: rootProps,
+      _container: null,
+      _context: {                     // ⭐ 全局配置包
+        components: {}, directives: {},
+        provides: Object.create(null),  // 第 24 章 provide 的全局兜底
+        config: { ... },
+      },
+      use(plugin, ...options) { ...; return app; },        // ⭐ 返回 app = 链式调用
+      component(name, comp) { ...; return app; },
+      directive(name, dir) { ...; return app; },
+      provide(key, value) { this._context.provides[key] = value; return app; },
+
+      mount(rootContainer) {          // ⭐⭐ 真正的启动入口
+        const vnode = createVNode(rootComponent, rootProps);
+        vnode.appContext = this._context;
+        render(vnode, rootContainer); // ← 一切从这里开始
+        this._container = rootContainer;
+        return vnode.component.proxy; // 根组件实例的代理（第 22 章）
+      },
+    };
+    return app;
+  };
+}</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 两个「为什么不」</span><br>
+    <b>为什么不直接 render(App, '#app')？</b> 因为 app 对象是「全局配置的容器」：
+    app.use / app.component / app.provide 都要在渲染<b>之前</b>收进 _context，
+    根组件和所有子孙（inject、全局组件注册）都要靠它。<br>
+    <b>为什么 createAppAPI 要接收 render？</b> 渲染器是注入的（第 15 章）——
+    同一套 createAppAPI，web 上配 DOM nodeOps，自定义渲染器（比如本仓库嵌套 iframe 的玩法）配自己的 nodeOps。
+    一个入口，N 个平台。
+  </div>
+  <p>
+    本项目里对应的就是 <code class="inline">packages/runtime-dom/src/index.ts</code> 的那三行：
+    把 <code class="inline">nodeOps + patchProp</code> 打包成 renderOptions 交给 <code class="inline">createRenderer</code>，
+    再把 <code class="inline">createRenderer(...).render</code> 传给 createAppAPI —— 分层闭环。
+  </p>
+
+  <h2>21.2 app.mount('#app')：入口的三次「翻译」</h2>
+  <p>
+    你以为 mount 只是「渲染」？官方的 mount 在真正 render 之前做了三次翻译
+    （源码在 <code class="inline">runtime-dom/src/index.ts</code> 的 normalizedCreateApp 内）：
+  </p>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox gray">'#app'<br><small>字符串选择器</small></span>
+      <span class="farrow">→</span>
+      <span class="fbox">querySelector 拿到容器<br><small>若是 &lt;script&gt; 模板标签则取 innerHTML 当根模板</small></span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">App 组件<br><small>翻译成根 vnode</small></span>
+      <span class="farrow">→</span>
+      <span class="fbox rose">render(vnode, container)</span>
+    </div>
+    <div class="cap">翻译①：容器规范化 normalizeContainer；翻译②：组件 → vnode；翻译③：进入渲染器世界</div>
+  </div>
+  <p>
+    为什么组件必须先「翻译」成 vnode？因为 <b>render 的世界只认 vnode</b>（第 16 章）。
+    根组件、子组件、元素、文本 —— 在 patch 眼里一视同仁，全是节点。统一数据结构，
+    才有统一的 patch / diff / 组件复用逻辑。
+  </p>
+
+  <h2>21.3 🧪 启动流程实验室：亲手点亮调用链</h2>
+  <p>
+    下面的流程图就是完整启动链，<b>8 个节点对应 8 步</b>，每一步都标注了它用到的章节。
+    从上往下点，右侧日志同步输出 —— 走到最后一步，容器里会真的挂载出一个计数器。
+  </p>
+
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 启动流程实验室<span class="hint">createApp → mount → 第一个像素</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="bootSteps">
+        <button class="step-btn" data-boot="1">① createApp(App)</button>
+        <button class="step-btn" data-boot="2">② 全局配置入座</button>
+        <button class="step-btn" data-boot="3">③ app.mount('#app')</button>
+        <button class="step-btn" data-boot="4">④ render(vnode, container)</button>
+        <button class="step-btn" data-boot="5">⑤ setupComponent</button>
+        <button class="step-btn" data-boot="6">⑥ render 包进 effect</button>
+        <button class="step-btn" data-boot="7">⑦ 首次渲染上屏</button>
+        <button class="step-btn" data-boot="8">⑧ 日常循环</button>
+        <button class="step-btn" data-boot="reset">↺ 重置</button>
+      </div>
+      <div class="demo-grid wide-left">
+        <div class="demo-col">
+          <h4>🚀 启动调用链（点亮已走过的节点）</h4>
+          <div class="boot-flow" id="bootFlow">
+            <div class="boot-node" data-node="1"><b>createApp(App)</b><small>产出 app 对象（配置容器）· 本章 21.1</small></div>
+            <div class="boot-arrow">↓ 链式注册插件 / 全局组件 / provide</div>
+            <div class="boot-node" data-node="2"><b>app.use().component().provide()</b><small>全部收进 app._context</small></div>
+            <div class="boot-arrow">↓</div>
+            <div class="boot-node" data-node="3"><b>app.mount('#app')</b><small>normalizeContainer → createVNode · 本章 21.2</small></div>
+            <div class="boot-arrow">↓</div>
+            <div class="boot-node" data-node="4"><b>render(vnode, container)</b><small>patch(null, vnode) → processComponent · 第 17/19 章</small></div>
+            <div class="boot-arrow">↓</div>
+            <div class="boot-node" data-node="5"><b>mountComponent → setupComponent</b><small>initProps / initSlots / 执行 setup · 第 19/22 章</small></div>
+            <div class="boot-arrow">↓</div>
+            <div class="boot-node" data-node="6"><b>setupRenderEffect</b><small>render 包进 effect + queueJob · 第 2/23 章</small></div>
+            <div class="boot-arrow">↓</div>
+            <div class="boot-node" data-node="7"><b>update → render() → subTree</b><small>track 依赖 → patch(null, subTree) → mountElement · 第 4/17 章</small></div>
+            <div class="boot-arrow">↓</div>
+            <div class="boot-node" data-node="8"><b>✨ 第一个像素 + mounted</b><small>此后：trigger → queueJob → patch 循环 · 第 5/18/23 章</small></div>
+          </div>
+        </div>
+        <div class="demo-col">
+          <h4>📜 事件日志</h4>
+          <div class="console" id="bootConsole" style="height:420px"></div>
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat" id="bootStage"><div class="v">0 / 8</div><div class="k">启动进度</div></div>
+        <div class="stat" id="bootPhase"><div class="v">未启动</div><div class="k">当前阶段</div></div>
+      </div>
+      <h4 style="font-size:13px;color:var(--green-d);text-transform:uppercase;letter-spacing:.07em;margin:6px 0 10px">🖥️ 目标容器 #app（教学演示）</h4>
+      <div class="boot-app" id="bootApp">（空容器 —— 等待 mount）</div>
+      <p style="font-size:14px;color:var(--dim);margin-bottom:0" id="bootTip">
+        提示：按 ①→⑧ 顺序点击。最后一步挂载出的计数器是真的 —— 点它，感受第 5/23 章的循环。
+      </p>
+    </div>
+  </div>
+
+  <h2>21.4 一张表对照官方源码</h2>
+  <table>
+    <tr><th>启动环节</th><th>官方源码位置（vuejs/core）</th><th>对应章节</th></tr>
+    <tr><td>createApp / createAppAPI</td><td><code class="inline">runtime-core/src/apiCreateApp.ts</code></td><td>本章 21.1</td></tr>
+    <tr><td>容器规范化、根模板提取</td><td><code class="inline">runtime-dom/src/index.ts</code>（normalizedCreateApp）</td><td>本章 21.2</td></tr>
+    <tr><td>懒创建渲染器（tree-shaking SSR）</td><td><code class="inline">runtime-dom/src/index.ts</code>（ensureRenderer）</td><td>第 15 章</td></tr>
+    <tr><td>patch 分流 processComponent</td><td><code class="inline">runtime-core/src/renderer.ts</code></td><td>第 17/19 章</td></tr>
+    <tr><td>setup 执行、实例创建</td><td><code class="inline">runtime-core/src/component.ts</code></td><td>第 19/22 章</td></tr>
+  </table>
+
+  
+  <h2>21.5 app 对象的其余 API：use / component / directive / provide</h2>
+  <p>mount 之外，app 对象还有五个注册方法 —— 它们全都是「往 _context 里塞东西」，各有一个值得注意的细节：</p>
+  <pre class="code" data-title="app 各注册方法的真身（apiCreateApp.ts，简化）"><code>// createAppAPI 的闭包里：
+const installedPlugins: Plugin[] = [];          // ⭐ 记录本 app 装过哪些插件（防重复）
+
+use(plugin, ...options) {
+  if (installedPlugins.includes(plugin)) {      // 重复安装 → dev 警告
+    warn(...);
+  } else if (plugin &amp;&amp; isFunction(plugin.install)) {
+    installedPlugins.push(plugin);              // ① 对象插件：调它的 install 方法
+    plugin.install(app, ...options);
+  } else if (isFunction(plugin)) {              // ② 函数插件：直接调用
+    installedPlugins.push(plugin);
+    plugin(app, ...options);
+  } else {
+    warn(`Invalid plugin...`);
+  }
+  return app;
+},
+component(name, component) {
+  this._context.components[name] = component;   // 注册进全局表
+  return this;
+},
+directive(name, directive) { this._context.directives[name] = directive; return this; },
+provide(key, value) { (this._context.provides)[key] = value; return this; },  // 第 24 章的原型链顶端</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 mixin：最后一个老 API 的处境</span><br>
+    app.mixin 仍然存在（合并进组件 options，data 用深合并、钩子合并成数组依次执行），
+    但官方文档已把它标为「不推荐」—— 逻辑来源分散、命名冲突隐晦。
+    组合式函数（composable）是官方给出的替代：显式 import、显式调用、类型可推导。
+    读老项目时你会遇到 mixin，理解它的合并策略即可，新代码请用组合式。
+  </div>
+
+  <h2>21.5 app 对象全家福：mount 之前的所有配置</h2>
+  <p>在 21.1 的骨架里，app 对象还有一整层「配置面」没展开 —— 每一项都对应一个运行时机制：</p>
+  <table>
+    <tr><th>API</th><th>登记位置</th><th>消费时机</th><th>本站章节</th></tr>
+    <tr><td><code class="inline">app.use(plugin)</code></td><td>插件对象带 <code class="inline">install(app)</code> 就调它；函数直接调用</td><td>install 里通常注册全局组件/指令/provide</td><td>router、pinia 的入口套路</td></tr>
+    <tr><td><code class="inline">app.component(name, c)</code></td><td><code class="inline">_context.components[name]</code></td><td>渲染时 <code class="inline">resolveComponent</code> 查表</td><td>16 章</td></tr>
+    <tr><td><code class="inline">app.directive(name, d)</code></td><td><code class="inline">_context.directives[name]</code></td><td>编译产物 resolveDirective 查表</td><td>26 章</td></tr>
+    <tr><td><code class="inline">app.provide(key, v)</code></td><td><code class="inline">_context.provides</code>（原型链顶端）</td><td>inject 沿原型链找到它</td><td>24 章</td></tr>
+    <tr><td><code class="inline">app.config</code></td><td><code class="inline">globalProperties / errorHandler / warnHandler</code></td><td>this.xxx 查 globalProperties；错误走 35 章</td><td>30 章</td></tr>
+  </table>
+  <div class="callout warn">
+    <span class="tag">⚠️ 为什么这些配置必须在 mount 之前？</span><br>
+    mount 时 <code class="inline">vnode.appContext = app._context</code> 把配置包「下发」到根组件，
+    之后沿实例树继承。mount 之后再来 <code class="inline">app.use(...)</code>，
+    已挂载的组件树<b>不会</b>感知（dev 模式还有警告）。「先配置、后启动」不是代码风格，
+    是数据流向的物理结果。
+  </div>
+
+
+  <h2>21.6 app.unmount 与「一个 app 的一生」</h2>
+  <pre class="code" data-title="app.unmount（官方 apiCreateApp.ts）"><code>unmount() {
+  if (this._container) {
+    render(null, this._container);   // ⭐ 复用同一个 render：vnode=null 走卸载分支
+  }
+}
+// 卸载链（17.4）：根组件 unmount → instance.scope.stop()（第 10 章）
+//   → 渲染 effect 停止 → 子孙递归 unmount → onUnmounted 进 post 队列</code></pre>
+  <table>
+    <tr><th>行为</th><th>规则</th><th>原因</th></tr>
+    <tr><td>同一容器 mount 两次</td><td>dev 警告，第二次被忽略</td><td>app._container 只有一个，二次 mount 会状态错乱</td></tr>
+    <tr><td>unmount 后再 mount 同容器</td><td>允许，全新挂载</td><td>「销毁重建」型集成的标准姿势（如弹窗应用）</td></tr>
+    <tr><td>多个 app 共存一页</td><td>完全独立</td><td>每个 app 独立 _context / provides / errorHandler</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 一个 app = 一个「宇宙」</span><br>
+    createApp 创造的不是「页面」，是一个带独立全局配置的运行时宇宙：自己的组件表、指令表、provides、错误处理器。
+    同一页面并排多个宇宙互不串台 —— 微前端把多个 Vue 应用塞进一个页面而不互相污染，靠的就是这个设计。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：启动流程</summary>
+    <div class="quiz-body">
+      <p>1. app.use() 为什么能链式调用？它注册的配置存到哪里、谁在什么时候消费它？<br>
+         2. mount 之后立即改一个响应式数据，页面会同步更新吗？（下一章揭晓）</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. app 的每个注册方法最后都 <code class="inline">return app</code>。配置全部收进 <code class="inline">app._context</code>，
+        消费时机在组件 mount 时：vnode.appContext 顺着实例树下发，全局组件/指令在 resolveComponent 时查表，
+        provide 作为 provides 原型链的顶端（第 24 章）。<br>
+        2. 不会同步更新 —— 更新 effect 的 scheduler 是 queueJob，要等微任务 flush（第 23 章）。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="startflow">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="renderer.html#blocktree"><span class="dir">上一章</span><span class="t">← Block Tree 运行时消费</span></a>
+    <a class="next" href="#compdata"><span class="dir">下一章</span><span class="t">组件实例：props / emit / slots →</span></a>
+  </div>
+</section>
+
+<!-- ============ 22 compdata ============ -->
+<section class="page" id="page-compdata">
+  <div class="kicker">第 22 章 · 组件与调度篇</div>
+  <h1>组件实例：props / emit / slots 三大件</h1>
+  <p class="lead">
+    第 19 章的 mountComponent 里，<code class="inline">instance.props = vnode.props</code> 是极度简化的教学写法。
+    真实的 Vue 里，props 的初始化、事件的派发、插槽的处理，各自是一门精细活 ——
+    本章把组件实例这个「档案袋」彻底拆开。官方源码集中在
+    <code class="inline">componentProps.ts</code>、<code class="inline">componentEmits.ts</code>、<code class="inline">componentSlots.ts</code> 三个文件。
+  </p>
+
+  <h2>22.1 组件实例：全字段解剖</h2>
+  <p>setupComponent 做完之后，instance（组件实例）长这样 —— 这是你未来读官方源码时最高频的一张表：</p>
+  <table>
+    <tr><th>字段</th><th>是什么</th><th>相关章节</th></tr>
+    <tr><td><code class="inline">vnode / next</code></td><td>当前 vnode / 待更新的新 vnode</td><td>第 19 章</td></tr>
+    <tr><td><code class="inline">type / parent / appContext</code></td><td>组件对象 / 父实例 / 全局配置包</td><td>第 19/21 章</td></tr>
+    <tr><td><code class="inline">propsOptions</code></td><td>组件声明的 props 规范（对象形式）</td><td>本章</td></tr>
+    <tr><td><code class="inline">props</code></td><td>声明过的 props，<b>shallowReactive</b> 响应式</td><td>本章 22.2</td></tr>
+    <tr><td><code class="inline">attrs</code></td><td>没声明的透传属性，<b>shallowReactive</b></td><td>本章 22.2</td></tr>
+    <tr><td><code class="inline">slots</code></td><td>插槽函数袋（编译产物）</td><td>本章 22.4</td></tr>
+    <tr><td><code class="inline">emit</code></td><td>绑定好实例的事件派发函数</td><td>本章 22.3</td></tr>
+    <tr><td><code class="inline">setupState / render</code></td><td>setup 返回值（proxyRefs 脱壳）/ 渲染函数</td><td>第 7/19 章</td></tr>
+    <tr><td><code class="inline">proxy</code></td><td>渲染上下文代理（this 的真身）</td><td>本章</td></tr>
+    <tr><td><code class="inline">provides</code></td><td>本组件对下提供的注入源（原型链）</td><td>第 24 章</td></tr>
+    <tr><td><code class="inline">subTree / update / isMounted</code></td><td>渲染子树 / 更新 effect / 挂载标记</td><td>第 19 章</td></tr>
+    <tr><td><code class="inline">bm / m / bu / u ...</code></td><td>生命周期钩子数组（beforeMount/mounted/...）</td><td>第 19/23 章</td></tr>
+  </table>
+
+  <h2>22.2 initProps：props 与 attrs 的「分家」</h2>
+  <p>
+    父组件传来的 vnode.props 是一锅生的：声明过的是 props，没声明的是 attrs（透传属性）。
+    initProps 就是分家现场：
+  </p>
+  <pre class="code" data-title="initProps（教学完整版）"><code>function initProps(instance, rawProps, isStateful) {
+  const props = {};      // 将变成 shallowReactive
+  const attrs = {};      // 将变成 shallowReactive
+  setFullProps(instance, rawProps, props, attrs);   // 按 propsOptions 分拣
+
+  if (isStateful) {
+    // ⭐ 注意是「浅」响应式：只有第一层是响应的
+    instance.props = shallowReactive(props);
+  } else {
+    instance.props = props;   // 函数式组件不包代理（性能）
+  }
+  instance.attrs = shallowReactive(attrs);
+}
+
+function setFullProps(instance, rawProps, props, attrs) {
+  const options = instance.propsOptions;   // 组件声明的 props 规范
+  for (const key in rawProps) {
+    const value = rawProps[key];
+    if (options &amp;&amp; hasOwn(options, key)) {
+      props[key] = value;                  // 声明过 → props
+    } else {
+      attrs[key] = value;                  // 没声明 → attrs（透传）
+    }
+  }
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么是 shallowReactive 而不是 reactive？</span><br>
+    props 通常是<b>父传子的一次性快照</b>，深层对象基本不会再被组件内部改写。
+    深度代理一个大对象要为每层嵌套建 Proxy + 收集依赖，开销巨大却几乎没收益 ——
+    所以 Vue 只代理第一层。这也是官方文档「不要在子组件里改 props」的性能注脚。
+  </div>
+  <div class="callout warn">
+    <span class="tag">⚠️ attrs 的默认归宿：透传到根元素</span><br>
+    子组件没声明 <code class="inline">inheritAttrs: false</code> 时，attrs（class、style、id...）
+    会在 patch 时自动合并到根元素上。声明 false 后，透传权交给你 —— 用 <code class="inline">v-bind="$attrs"</code> 手动指定去处。
+    本质都是同一份 attrs 数据，只是流向不同。
+  </div>
+
+  <h2>22.3 emit：一个事件名的两次变换</h2>
+  <p>
+    子组件里 <code class="inline">emit('my-change', 1)</code>，父组件里写的却是 <code class="inline">@my-change</code>。
+    两者怎么对上？答案是：emit 到 props 里<b>找以事件名变换来的函数</b>：
+  </p>
+  <pre class="code" data-title="emit（教学版，源自 componentEmits.ts）"><code>function createEmit(instance) {
+  function emit(event, ...args) {
+    // 事件名两次变换：my-change → onMy-change（原样）→ onMyChange（驼峰）
+    let handlerName;
+    let handler =
+      instance.props[(handlerName = toHandlerKey(event))] ||          // 原样
+      instance.props[(handlerName = toHandlerKey(camelize(event)))];  // 驼峰
+    // v-model 的 update:xxx 事件还有一次连字符兜底（仅 model 监听器会走这）
+    if (!handler &amp;&amp; isModelListener) {
+      handlerName = toHandlerKey(hyphenate(event));
+      handler = instance.props[handlerName];
+    }
+    if (handler) {
+      callWithAsyncErrorHandling(handler, instance, args);  // 实际就是调用父组件传的 onXxx 回调
+    } else {
+      // ...未监听时的 dev 警告（v-model 以外的自定义事件不警告）
+    }
+  }
+  return emit;
+}
+// toHandlerKey('my-change') = 'onMy-change'；camelize('my-change') = 'myChange'</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 原来如此</span><br>
+    emit 不是什么「事件总线」，它就是<b>调 props 里的函数</b>。
+    <code class="inline">@my-change="fn"</code> 编译后就是 <code class="inline">onMyChange: fn</code> ——
+    和 <code class="inline">props 传函数</code>是同一条路，只是命名有约定。理解了这一层，
+    「emit 和 prop 传函数有什么区别」这种面试题就有了降维打击的答案。
+  </div>
+
+  <h2>22.4 initSlots：编译好的「函数袋」</h2>
+  <p>
+    关键认知：<b>插槽在编译期就已经变成了函数</b>。模板里的子内容会被编译成
+    <code class="inline">{ default: () =&gt; [...] }</code> 这样的槽对象，
+    initSlots 只需要把它挂上实例（需要懒代理/兜底时再包一层 Proxy）：
+  </p>
+  <pre class="code" data-title="模板 → 编译产物 → initSlots"><code>// 你写的模板（子组件）：
+//   &lt;div&gt;&lt;slot :item="item"&gt;&lt;/slot&gt;&lt;/div&gt;
+
+// 父组件模板编译产物（静态内容的槽）：
+h(Child, null, {
+  default: () =&gt; [h('span', null, '固定文案')],   // 函数！
+  _: 1 /* STABLE 标记 */
+})
+
+// initSlots（教学版）：
+function initSlots(instance, children) {
+  if (typeof children === 'object' &amp;&amp; !Array.isArray(children)) {
+    instance.slots = children;      // 编译器产出的槽对象，直接挂
+  } else {
+    instance.slots = { default: () =&gt; normalizeChildren(children) };
+  }
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 普通插槽 vs 作用域插槽：函数调用的时机不同</span><br>
+    编译后它们都是函数，但普通插槽的函数体在<b>父组件渲染时</b>执行（生成静态内容），
+    作用域插槽的函数在<b>子组件渲染时</b>带着 slotProps 调用 —— 所以子组件数据一变，
+    槽内容能跟着变。slot 对象里的 <code class="inline">_: 1</code>（STABLE 标记，官方 SlotFlags：
+    STABLE=1 / DYNAMIC=2 / FORWARDED=3）告诉 patch：槽内容不依赖子组件的状态，子组件更新时
+    可以跳过槽的重新收集；一旦槽里用到了 slotProps（作用域插槽），编译器就会打
+    <code class="inline">_: 2</code>（DYNAMIC）强制每次更新 —— 又是一个编译期反哺运行时的例子（第 30 章）。
+  </div>
+
+  <h2>22.5 setupComponent 的完整时序</h2>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox">initProps</span>
+        <span class="farrow">→</span>
+        <span class="fbox">initSlots</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">setup(props, { emit, slots, attrs, expose })</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">setup 返回函数 →</span>
+        <span class="farrow">→</span>
+        <span class="fbox">它就是 render</span>
+        <span class="farrow">｜</span>
+        <span class="fbox gray">返回对象 →</span>
+        <span class="farrow">→</span>
+        <span class="fbox">proxyRefs 脱 .value（第 7 章）</span>
+      </div>
+      <div class="flow">
+        <span class="fbox rose">setupRenderEffect</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">render 包进 effect（第 19 章）</span>
+        <span class="farrow">→</span>
+        <span class="fbox">首屏上屏</span>
+      </div>
+    </div>
+    <div class="cap">注意顺序：props/slots 必须在 setup 之前就位 —— 因为 setup 的第一个参数就是 props</div>
+  </div>
+
+  
+  <h2>22.6 defineExpose：把组件的「内部」关进抽屉</h2>
+  <p>
+    script setup 的组件默认是<b>封闭的</b>：父组件拿 ref 拿到的实例代理，
+    什么都看不到（这是有意的封装）。想主动暴露，必须用 <code class="inline">defineExpose</code>：
+  </p>
+  <pre class="code" data-title="expose 的机制（简化）"><code>// setupContext.expose 的真身：
+expose(exposed) { instance.exposed = exposed || {}; }
+
+// 父组件 ref 拿到的其实是：
+const publicThis = exposed
+  ? new Proxy(exposed, PublicInstanceProxyHandlers)   // ⭐ 只包 exposed
+  : instance.proxy;                                    // options API：整实例可见
+
+// 子组件：
+const count = ref(0);
+defineExpose({ reset: () =&gt; (count.value = 0) });
+// 父组件：childRef.value.reset() ✅；childRef.value.count ✗（被关在抽屉外）</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么默认封闭是正确的设计</span><br>
+    组件间的合法通道只有三条：props（下行）、emit（上行）、插槽（内容注入）。
+    ref 直捅内部是「后门」—— 默认关上，逼你先想想这条通信是否真的该存在。
+    后门打开时也只开一条缝（exposed 白名单），而不是整扇门。
+    对比 React 的 useImperativeHandle —— 同一个设计决定，同一个理由。
+  </div>
+
+  <h2>22.6 mergeProps 的合并细则：同名 prop 冲突怎么办</h2>
+  <p>
+    16.6 的表格里埋了合并策略，这里给全量规则（源码 <code class="inline">vnode.ts → mergeProps</code>，
+    createVNode / cloneVNode / v-bind 合并都走它）：
+  </p>
+  <pre class="code" data-title="mergeProps 的分派逻辑（源码级简化）"><code>for (const key in props) {
+  if (key === 'class') {
+    ret.class = normalizeClass([ret.class, toMerge.class]);   // 数组归一化拼接
+  } else if (key === 'style') {
+    ret.style = normalizeStyle([ret.style, toMerge.style]);   // 对象合并，后者优先
+  } else if (isOn(key)) {                                     // on 开头 → 事件
+    const existing = ret[key], incoming = toMerge[key];
+    if (incoming &amp;&amp; existing !== incoming) {
+      ret[key] = existing
+        ? [].concat(existing, incoming)                        // ⭐ 两个都调
+        : incoming;
+    }
+  } else {
+    ret[key] = toMerge[key];                                   // 其余：后者覆盖
+  }
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 事件为什么合数组而不是覆盖？</span><br>
+    高频场景：组件内部自己绑了 <code class="inline">onClick</code>（比如关闭弹窗），
+    同时父组件又透传了 <code class="inline">v-bind="$attrs"</code> 里的 onClick（埋点）。
+    覆盖会让其中一方静默失效 —— 排查极难。合并数组让两者都跑，这是「透传不丢行为」的保证。
+    代价：invoker 里要处理数组（第 15 章的 invoker.value 调用前判断 Array.isArray 依次调用）。
+  </div>
+
+
+  <h2>22.7 模板 ref 与 setRef：「取到组件/DOM」的那条暗线</h2>
+  <p>
+    <code class="inline">const el = ref(null); &lt;input ref="el"&gt;</code> —— el 为什么能拿到 DOM？
+    这条暗线横跨 vnode → mount → 调度器三层，之前从没正讲过：
+  </p>
+  <pre class="code" data-title="setRef 机制（源码级简化）"><code>// ① 编译：ref="el" 变成 vnode 的 ref 属性
+_createVNode("input", { ref: el })            // el 就是那个 ref 对象
+
+// ② 挂载/更新：mountElement 发现 vnode.ref → 排进 post 队列（第 23 章！）
+if (ref != null &amp;&amp; parentComponent) {
+  queuePostRenderEffect(() =&gt; setRef(rawRef, oldRawRef, newRawRef, vnode), parentComponent);
+}
+
+// ③ setRef：按 ref 的形态分发
+function setRef(rawRef, oldRawRef, parentVNode, vnode) {
+  if (isRef(rawRef)) {
+    rawRef.value = vnode.el;                 // ⭐ 朴素到令人失望：把 DOM 塞进 .value
+  } else if (isFunction(rawRef)) {
+    callWithErrorHandling(rawRef, null, ..., [vnode.el, refs]);  // 函数式
+  }
+  // ref 指向组件 → 赋 instance.proxy；有 defineExpose 时只暴露 instance.exposed
+  // v-for 里的 ref → 收集成数组，按下标顺序赋值
+}</code></pre>
+  <table>
+    <tr><th>ref 形态</th><th>赋什么</th><th>注意</th></tr>
+    <tr><td><code class="inline">ref 对象</code></td><td>DOM 元素 / 组件公开代理</td><td>卸载时自动赋 null</td></tr>
+    <tr><td><code class="inline">函数</code></td><td>每次都调用：挂载传 el、更新传新 el、卸载传 null</td><td>是「双态钩子」，不只是第一次拿 DOM</td></tr>
+    <tr><td>字符串（Options API）</td><td>this.$refs[name]</td><td>本质同样走 setRef，只是终点不同</td></tr>
+    <tr><td>v-for 中的 ref</td><td>数组（按渲染顺序）</td><td>不是响应式数组 —— 不要依赖它做模板渲染</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 三个「原来如此」</span><br>
+    ① 为什么 onMounted 里才拿得到？—— 赋值在 <b>post 队列</b>（23 章），和 mounted 同一工序，DOM 已就位；<br>
+    ② <b>defineExpose 的消费点</b>就在这：组件 ref 拿到的是 <code class="inline">instance.exposed</code> 的代理，
+    没暴露的内部一概不可见 —— 封装边界由「setRef 赋什么」物理决定；<br>
+    ③ 函数式 ref 在每次更新都会执行 —— 想做「元素进出视口埋点」这类逻辑，它比 onMounted 更准。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：组件三大件</summary>
+    <div class="quiz-body">
+      <p>1. 子组件没有声明 id 这个 prop，模板根元素上却出现了 id —— 是谁干的？怎么阻止？<br>
+         2. 为什么在模板里 emit('my-change') 能触发 @myChange？中间发生了什么变换？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. attrs 透传（fallthrough）：initProps 分家时没进 props 的属性进入 instance.attrs，
+        patch 时默认合并到根元素。组件声明 <code class="inline">inheritAttrs: false</code> 即可阻止，改用 v-bind="$attrs" 手动指定。<br>
+        2. emit 内部把 'my-change' 依次尝试 camelize（→ myChange）和 capitalize（→ MyChange），
+        拼上 on 前缀后去 props 里找 onMyChange 调用 —— 本质就是调 props 里的函数。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="compdata">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#startflow"><span class="dir">上一章</span><span class="t">← 启动全流程：createApp → 像素</span></a>
+    <a class="next" href="#scheduler"><span class="dir">下一章</span><span class="t">调度器：queueJob 与 nextTick →</span></a>
+  </div>
+</section>
+
+<!-- ============ 23 scheduler ============ -->
+<section class="page" id="page-scheduler">
+  <div class="kicker">第 23 章 · 组件与调度篇</div>
+  <h1>调度器全貌：queueJob 与 nextTick</h1>
+  <p class="lead">
+    你在事件函数里连改三次数据，页面只重渲染一次；你在 <code class="inline">updated</code> 里读 DOM，
+    读到的一定是新值；你听说 <code class="inline">nextTick</code> 是微任务，但它凭什么排在 DOM 更新之后？
+    这一章是全书调度知识的总装车间 —— 官方源码只有一个文件：
+    <code class="inline">runtime-core/src/scheduler.ts</code>，不到 300 行，却支撑起整个框架的更新时序。
+  </p>
+
+  <h2>23.1 问题引入：同步更新的灾难</h2>
+  <p>假设更新是同步的 —— 每次 trigger 立刻重渲染。看一个日常操作的下场：</p>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox rose">handleClick() { a=1; b=2; c=3; }</span>
+        <span class="farrow">→</span>
+        <span class="fbox">trigger ×3</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">render + diff ×3</span>
+        <span class="farrow">→</span>
+        <span class="fbox">DOM 动了 3 次，前 2 次全是中间态</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">换成异步批处理：</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">trigger ×3 → job 只入队 1 次</span>
+        <span class="farrow">→</span>
+        <span class="fbox">微任务里 render + diff ×1</span>
+        <span class="farrow">→</span>
+        <span class="fbox">DOM 只动最后那一次 ✅</span>
+      </div>
+    </div>
+    <div class="cap">批处理省掉的不仅是 render 次数，还有两次完整的 diff 和 DOM 操作 —— 用户更是一帧都看不到中间态</div>
+  </div>
+  <p>
+    第 19 章你已经见过骨架版：Set 去重 + <code class="inline">Promise.resolve().then(flushJobs)</code>。
+    生产版要解决三个它没解决的问题：<b>①父组件必须先于子组件更新</b>（子组件可能依赖父组件更新后的状态）；
+    <b>②有些事必须赶在渲染前 / 渲染后做</b>（beforeUpdate / updated / watch 的 pre/post）；
+    <b>③用户要能「在更新完成后插一脚」</b>（nextTick）。
+  </p>
+
+  <h2>23.2 queueJob：旗标去重 + 有序插入</h2>
+  <pre class="code" data-title="queueJob（scheduler.ts，3.5 原文级简化）"><code>const queue = [];              // ⭐ 主队列（数组，因为要保持有序）
+let flushIndex = -1;           // 本轮已 flush 到哪（flush 期间也能入队）
+const pendingPostFlushCbs = [];// post 队列：updated / mounted / flush:'post' watcher...
+
+export function queueJob(job) {
+  // ① 去重靠 QUEUED 旗标（O(1) 位判断，不扫描队列）
+  if (!(job.flags &amp; SchedulerJobFlags.QUEUED)) {
+    const jobId = getId(job);
+    const lastJob = queue[queue.length - 1];
+    if (
+      !lastJob ||
+      // ② 快车道：id ≥ 队尾 → 直接 push（天然有序，绝大多数走这条）
+      (!(job.flags & SchedulerJobFlags.PRE) &amp;&amp; jobId >= getId(lastJob))
+    ) {
+      queue.push(job);
+    } else {
+      // ③ 慢车道：二分查找插入位（findInsertionIndex），保证队列始终按 id 升序
+      //    pre watcher 与所属组件 update 同 id，会被插到 update 前面 —— 卸载时能被跳过
+      queue.splice(findInsertionIndex(jobId), 0, job);
+    }
+    job.flags |= SchedulerJobFlags.QUEUED;
+    queueFlush();              // ⭐ 入队成功就预约 flush（微任务）
+  }
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 排序的意义：父先子后</span><br>
+    每个组件的 update job 都带着 <code class="inline">instance.uid</code>（组件创建顺序编号，父 &lt; 子）。
+    队列始终按 id 升序维护，<b>父组件必然先重渲染</b>：父给子传的新 props 已就位，子组件再更新时
+    shouldUpdateComponent（第 19 章）判断的才是「最终态」—— 避免子组件基于过期 props 白跑一趟。
+    这就是为什么队列不用 Set 而用数组：排序是硬需求。
+  </div>
+
+  <h2>23.3 flushJobs：一趟洗牌的完整流程</h2>
+  <pre class="code" data-title="flushJobs（scheduler.ts，3.5 原文级简化）"><code>const resolvedPromise = Promise.resolve();
+let currentFlushPromise = null;
+
+export function flushJobs(seen) {
+  isFlushing = true;
+  currentFlushPromise = null;
+  isFlushPending = false;
+
+  try {
+    // ① 先整体排序一次：uid 小的先跑 —— 父组件先更新
+    queue.sort((a, b) =&gt; getId(a) - getId(b));
+
+    // ② 下标遍历而不是 shift：flush 中新入队的 job 已被 findInsertionIndex
+    //    插到正确位置，天然被本轮消化（while + sort 的老写法已废弃）
+    for (flushIndex = 0; flushIndex &lt; queue.length; flushIndex++) {
+      const job = queue[flushIndex];
+      if (job &amp;&amp; !(job.flags & SchedulerJobFlags.DISPOSED)) {
+        if (__DEV__ &amp;&amp; check(job)) continue;   // dev：100 层递归上限保护
+        callWithErrorHandling(job, job.i,
+          job.i ? ErrorCodes.COMPONENT_UPDATE : ErrorCodes.SCHEDULER);
+        job.flags &amp;= ~SchedulerJobFlags.QUEUED;   // 跑完摘掉去重旗标
+      }
+    }
+  } finally {
+    flushIndex = -1;
+    queue.length = 0;
+
+    // ③ 主队列清空后，才 flush post 队列：updated、mounted、watch flush:'post'、模板 ref 赋值
+    flushPostFlushCbs(seen);
+
+    currentFlushPromise = null;
+    // ④ post 队列里可能又改了数据 → 队列非空就再来一轮
+    if (queue.length || pendingPostFlushCbs.length) {
+      flushJobs(seen);          // 官方还带 100 层递归上限保护（检查死循环更新）
+    }
+  }
+}
+
+// 触发点：queueJob / queuePostFlushCb 的首次入队
+function queueFlush() {
+  if (!currentFlushPromise) {
+    currentFlushPromise = resolvedPromise.then(flushJobs);  // ⭐ 微任务
+  }
+}</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 生命周期钩子的真相：调度器的「工序位」</span><br>
+    现在可以把生命周期连起来了：<b>pre watcher</b>（flush:'pre'，默认值）是一个带 PRE 旗标的 job，
+    与所属组件的 update 同 id 入队、排在其前 —— 组件被父级卸载时能被顺手跳过；
+    onBeforeUpdate 在组件更新前<b>同步</b>调用（updateComponentPreRender 里）；
+    onMounted / onUpdated / flush:'post' watcher 进 <b>post 队列</b>，由
+    <code class="inline">queuePostRenderEffect</code> 入队、主队列清空后统一执行。
+    所谓「生命周期时机」，本质是<b>调度器队列的工序位置</b>。第 19 章的「注册即挂榜」+ 本章的「flush 时工序」，拼图完成。
+  </div>
+
+  <h2>23.4 nextTick：排在 flush 之后的「顺路车」</h2>
+  <p>nextTick 的真身只有一行核心逻辑 —— 它搭的是同一条微任务链的顺风车：</p>
+  <pre class="code" data-title="nextTick（scheduler.ts 原文级别）"><code>const p = Promise.resolve();
+
+export function nextTick(fn) {
+  // 有 flush 在排队/进行中 → 挂在 currentFlushPromise 后面（更新完了才轮到我）
+  // 没有 → 挂在普通 resolved promise 后面（下个微任务直接跑）
+  return (currentFlushPromise || p).then(fn);
+}</code></pre>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox rose">同步代码</span>
+        <span class="farrow">→</span>
+        <span class="fbox">count = 1（trigger，job 入队）</span>
+        <span class="farrow">→</span>
+        <span class="fbox">nextTick(fn) 挂上 flush 链</span>
+        <span class="farrow">→</span>
+        <span class="fbox">setTimeout(fn2) 进宏任务队列</span>
+      </div>
+      <div class="flow">
+        <span class="fbox blue">微任务 1：flushJobs</span>
+        <span class="farrow">→</span>
+        <span class="fbox">render + diff → <b>DOM 更新</b></span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">微任务 2：nextTick 的 fn</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">……全部微任务跑完……</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">宏任务：setTimeout 的 fn2</span>
+      </div>
+    </div>
+    <div class="cap">nextTick 回调永远看到「最新 DOM」，setTimeout 则不一定 —— 它们隔着整个微任务队列</div>
+  </div>
+  <div class="callout warn">
+    <span class="tag">⚠️ 高频误区</span><br>
+    nextTick <b>不是 setTimeout 的封装</b>（宏任务）。它是微任务链的一环，
+    这意味着：① 它比 setTimeout 快得多（不用等整轮事件循环）；② 顺序有保证 ——
+    在 nextTick 里再 nextTick，后者一定在后者的 DOM 状态之后。
+    Vue2 的 nextTick 曾按 microtask 降级到 setImmediate/setTimeout，Vue3 直接锁定 Promise。
+  </div>
+
+  
+  <h2>23.5 nextTick 的五个高频追问</h2>
+
+  <h3>追问①：nextTick 能 await 吗？</h3>
+  <p>能 —— 它返回的就是 Promise，这是「真身是一行 then」决定的，没有任何黑魔法：</p>
+  <pre class="code" data-title="现代用法：await nextTick()"><code>async function handleClick() {
+  count.value++;
+  await nextTick();              // 走到这里时，DOM 已经按 count 新值更新完
+  console.log(el.textContent);   // 安全读取新 DOM
+}
+
+// 等价的老写法：nextTick(() =&gt; { console.log(el.textContent); })
+// 两者都是「挂到 flush 链之后」，await 只是 p.then 的语法糖</code></pre>
+
+  <h3>追问②：nextTick 里再改数据、再调 nextTick，顺序会乱吗？</h3>
+  <pre class="code" data-title="嵌套排队的时序推演"><code>count++;                            // 触发第 1 轮 flush 排队
+nextTick(() =&gt; {                    // A：挂第 1 轮 flush 链尾
+  count++;                          // A 里又改数据 → 触发第 2 轮 flush 排队
+  nextTick(() =&gt; console.log("C")); // C：挂第 2 轮 flush 链尾
+});
+nextTick(() =&gt; console.log("B"));   // B：也挂第 1 轮链尾
+
+// 微任务队列严格保序，实际执行顺序：
+// flush① → A（改数据，注册 flush②）→ B → flush② → C
+// ⭐ 注意 B：执行时 count 已被 A 改成新值，但 DOM 还是第 1 轮的旧值！</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 B 为什么「半新半旧」？</span><br>
+    B 排队时挂的是第 1 轮 flush 的链；A 中途新开一轮 flush，B 不会跟着「跳车」到第 2 轮。
+    所以在 nextTick 回调里再改数据时，<b>同链后继读到的是「count 新、DOM 旧」的中间世界</b>。
+    实践守则：nextTick 回调里尽量只读 DOM；要改数据，就把「读新 DOM」的动作挂到新一轮
+    nextTick 上（上面例子的 C）。下面的实验室场景④可以亲手看到 B 的「错位瞬间」。
+  </div>
+
+  <h3>追问③：updated 钩子和 nextTick，用哪个？</h3>
+  <table>
+    <tr><th></th><th>nextTick</th><th>onUpdated</th></tr>
+    <tr><td>注册位置</td><td>任何地方（事件回调、async 函数、组合式函数）</td><td>只能 setup 同步阶段（currentInstance 指针在家的窗口期，第 19 章）</td></tr>
+    <tr><td>触发范围</td><td>只等「这次触发」的那一轮 flush</td><td>本组件<b>任何一次</b>更新完成都触发</td></tr>
+    <tr><td>适合</td><td>一次性动作：「这次改完数据我要读一次 DOM」</td><td>常驻逻辑：「每次更新后都要做」</td></tr>
+  </table>
+
+  <h3>追问④：为什么不用 setTimeout？—— 一张图看懂「渲染时机」</h3>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">调用栈清空</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">① 清空整个微任务队列</span>
+        <span class="farrow">→</span>
+        <span class="fbox">② 浏览器渲染（rAF → style → layout → paint）</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">③ 取一个宏任务（setTimeout）</span>
+      </div>
+    </div>
+    <div class="cap">事件循环的一轮。微任务在「渲染之前」清空，宏任务在「渲染之后」才轮到 —— 这是 nextTick 又快又稳的根本原因</div>
+  </div>
+  <p>三个推论：① nextTick 回调在<b>本轮渲染前</b>跑完，用户永远看不到中间态；② setTimeout 至少下一帧才执行，还要和其他宏任务排队；③ 假如用 setTimeout 做更新调度，一帧内多次改数据会画出多次中间态 —— 帧率直接崩。</p>
+
+  <h3>追问⑤：nextTick 实现史：一条「降级链」的故事</h3>
+  <p>
+    Vue2 的 nextTick 是一段著名的降级链，原因只有一个：nextTick 必须是<b>微任务</b>（否则渲染时机不成立），
+    但老浏览器 / 老 WebView 的 Promise 支持参差不齐。于是从高到低逐级探测：
+  </p>
+  <pre class="code" data-title="Vue2 的 nextTick 降级链（源码简化）"><code>if (typeof Promise !== 'undefined') {
+  // ⭐ 首选：微任务，标准答案
+} else if (typeof MutationObserver !== 'undefined') {
+  // 降级①：MO 回调也是微任务！造一个文本节点，改一个字符 = 人造微任务
+  //        这是老 iOS / 早期 WebView 上的「用规范条文当调度器」
+} else if (typeof setImmediate !== 'undefined') {
+  // 降级②：IE / Node 专属，宏任务但比 setTimeout 快（无 4ms 节流）
+} else {
+  // 降级③：setTimeout 兜底
+}
+// Vue 3 直接砍掉整条降级链：目标浏览器全支持 Promise —— 只留一行 then</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 MutationObserver 那个骚操作值得单独记</span><br>
+    Promise 普及前，Vue 靠「创建文本节点 + 改一个字符」来人造微任务 —— 因为规范规定
+    MutationObserver 的回调是微任务。<b>把规范条文当调度器用</b>，讲出来就是面试降维打击。
+  </div>
+
+  <h2>23.6 🧪 nextTick 时序实验室</h2>
+  <p>
+    下面的实验室跑着一个<b>与官方 scheduler 同构的迷你引擎（约 50 行）</b>，全部时序都是真实的 Promise 微任务，
+    不是模拟打印。三个场景 + 重置，把上面的理论亲眼跑一遍。
+  </p>
+
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 nextTick 时序实验室<span class="hint">queueJob / flushJobs / nextTick · 真实微任务</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="ntSteps">
+        <button class="step-btn" data-nt="batch">① 连改三次数据</button>
+        <button class="step-btn" data-nt="tick">② nextTick vs setTimeout</button>
+        <button class="step-btn" data-nt="loop">③ updated 里再改数据</button>
+        <button class="step-btn" data-nt="tick2">④ 连续 nextTick + 嵌套改数据</button>
+        <button class="step-btn" data-nt="reset">↺ 重置</button>
+      </div>
+      <div class="demo-grid wide-left">
+        <div class="demo-col">
+          <h4>📜 事件日志（注意顺序！）</h4>
+          <div class="console" id="ntConsole" style="height:330px"></div>
+        </div>
+        <div class="demo-col">
+          <h4>📊 引擎状态（实时）</h4>
+          <div class="stat-grid" style="margin-top:0">
+            <div class="stat" id="ntVal"><div class="v">0</div><div class="k">count（响应式数据）</div></div>
+            <div class="stat" id="ntQueueN"><div class="v">0</div><div class="k">队列中 job 数</div></div>
+            <div class="stat" id="ntFlushN"><div class="v">0</div><div class="k">flush 轮次</div></div>
+          </div>
+          <h4>🖥️ 页面（render 的产物）</h4>
+          <div class="boot-app" id="ntDom"><span style="color:var(--dim)">页面显示：0</span></div>
+        </div>
+      </div>
+      <p style="font-size:14px;color:var(--dim);margin-bottom:0" id="ntTip">
+        提示：① 看三次 trigger 如何合并成一次 render；② 记住日志顺序：同步 → flush（微任务）→ nextTick（微任务）→ setTimeout（宏任务）；③ 看「不死循环」怎么炼成；④ 场景④重点盯 B：它的 DOM 是旧的（半新半旧世界）。
+      </p>
+    </div>
+  </div>
+
+  <h2>23.7 官方源码地图 + 自测</h2>
+  <table>
+    <tr><th>调度器导出</th><th>作用</th><th>谁在用</th></tr>
+    <tr><td><code class="inline">queueJob / queuePreFlushCb / queuePostFlushCb</code></td><td>三种入队</td><td>组件更新 / 生命周期 / watch</td></tr>
+    <tr><td><code class="inline">flushJobs / flushPreFlushCbs / flushPostFlushCbs</code></td><td>三段式冲刷</td><td>微任务入口</td></tr>
+    <tr><td><code class="inline">nextTick</code></td><td>挂 flush 之后的微任务</td><td>用户 API、Suspense</td></tr>
+    <tr><td><code class="inline">invalidateJob</code></td><td>flush 中修正已排队 job</td><td>props 变化时</td></tr>
+    <tr><td>递归上限（100）</td><td>死循环更新保护 + dev 警告</td><td>「Maximum recursive updates」报错就来自这</td></tr>
+  </table>
+
+  
+  <h2>23.7 递归更新保护：「Maximum recursive updates」从哪来</h2>
+  <p>第 23.3 节的 flushJobs 里藏着一行防御代码，它就是那个著名报错的出处：</p>
+  <pre class="code" data-title="flushJobs 尾部的递归保护（官方 scheduler.ts）"><code>// checkRecursiveUpdates：seen 是本轮 flush 携带的 Map
+const count = seen.get(job) || 0;
+if (count &gt; RECURSION_LIMIT /* 100 */) {
+  throw new Error(
+    'Maximum recursive updates exceeded in component. ' +
+    'This means you have a reactive effect that is mutating its own dependencies...'
+  );
+}
+seen.set(job, count + 1);
+job();</code></pre>
+  <p>什么代码会触发它？<b>effect 更新了自己依赖的数据</b>，且不是有意的：</p>
+  <pre class="code" data-title="三个典型肇事者"><code>// ① render 里改自己读的数据
+{{ list.sort() }}                        // sort 原地改数组 → 读 list 又写 list → 循环
+
+// ② watch 的回调里改自己 watch 的数据（无守卫）
+watch(() =&gt; form.value, v =&gt; { form.value = normalize(v) })  // 每次都写 → 又触发
+
+// ③ updated 钩子里改数据且每次都改
+onUpdated(() =&gt; { counter.value++ })     // 每次渲染后都改 → 永远渲染不完</code></pre>
+  <div class="callout warn">
+    <span class="tag">⚠️ 生产环境没有这个警告怎么办</span><br>
+    递归检查主要在开发模式生效（生产构建会剥离部分检查）。上线后的表现是「页面卡死 / 更新风暴」。
+    排查口诀：找一个<b>「渲染函数或其钩子里写了渲染函数读过的数据」</b>的赋值语句；
+    修复姿势三选一：改成计算属性、给赋值加 <code class="inline">if (!isEqual(next, prev))</code> 守卫、
+    或挪进事件回调。本质都是打破「读 → 写 → 触发读」的闭环。
+  </div>
+
+  <h2>23.7 插队与撤单：invalidateJob 与 flush:'sync'</h2>
+  <p>生产级调度器还有两个边缘但必会的机制：</p>
+  <pre class="code" data-title="invalidateJob：flush 中途的「就地正法」"><code>// 场景：flush 进行中，父组件 job 先跑 → 给子组件传了新 props → 子组件 job 已在队尾
+// 若等子 job 照常执行，它读到的 next/props 又要再来一轮 patch —— 浪费一整次
+
+export function invalidateJob(job) {
+  const i = queue.indexOf(job);
+  if (i &gt; flushIndex) {          // 还没轮到它
+    queue.splice(i, 1);          // ① 从队列移除
+  }
+}
+// 调用点：updateComponentPreRender（beforeUpdate 工序）里发现 next 变化时
+// ⭐ 效果：子组件的更新并入「父组件正在进行的这一轮」，子组件看到的 props 就是最终态</code></pre>
+  <table>
+    <tr><th>flush 模式</th><th>注册 API</th><th>执行时机</th><th>典型场景</th></tr>
+    <tr><td><code class="inline">pre</code>（默认）</td><td><code class="inline">watch(source, cb)</code></td><td>组件更新前（23.3 的 pre 队列）</td><td>读写状态、联动校验</td></tr>
+    <tr><td><code class="inline">post</code></td><td><code class="inline">watch(source, cb, { flush: 'post' })</code> / <code class="inline">watchPostEffect</code></td><td>DOM 更新后（post 队列）</td><td>测量 DOM、初始化图表</td></tr>
+    <tr><td><code class="inline">sync</code></td><td><code class="inline">{ flush: 'sync' }</code> / <code class="inline">watchSyncEffect</code></td><td>数据一变立即执行，不排队</td><td>极少数需要即时联动（慎用：失去批处理）</td></tr>
+  </table>
+  <div class="callout warn">
+    <span class="tag">⚠️ sync 的代价</span><br>
+    flush:'sync' 意味着放弃 23.1 讲的一切批处理红利：
+    一个函数里改三次数据，回调跑三次。它的合法用途极窄（比如拖拽时同步计算位置），
+    面试能说清「sync 放弃了什么」比「sync 是什么」值钱。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：调度器</summary>
+    <div class="quiz-body">
+      <p>1. 为什么队列用数组不用 Set？<br>
+         2. 父组件更新导致子组件 props 变化，父和子的 update job 谁先执行？靠什么保证？<br>
+         3. nextTick 里读 DOM 为什么一定是新值？在 setTimeout 里读呢？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 因为 flush 前要按 job.id 排序（父先子后），Set 无序；数组 + includes 去重即可。<br>
+        2. 父先。每个 job.id = instance.uid，创建顺序父 &lt; 子，flushJobs 开头 sort 保证。<br>
+        3. nextTick 的回调挂在 currentFlushPromise 之后，DOM 更新的微任务先执行完；
+        setTimeout 是宏任务，要等所有微任务（包括 flush 和 nextTick）跑完才轮到 —— 读到什么取决于之前是否触发过更新。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="scheduler">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#compdata"><span class="dir">上一章</span><span class="t">← 组件实例：props / emit / slots</span></a>
+    <a class="next" href="#pin"><span class="dir">下一章</span><span class="t">provide/inject 与内置组件 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 24 pin ============ -->
+<section class="page" id="page-pin">
+  <div class="kicker">第 24 章 · 组件与调度篇</div>
+  <h1>provide/inject 与内置组件走读</h1>
+  <p class="lead">
+    收官前的最后一站：四个「官方标准件」。它们的实现思想各不相同 —— 原型链、状态机、
+    DOM 挪移、patch 分流 —— 但用的全是你已经学过的机制。本章对照官方源码走读，
+    帮你把 <code class="inline">vuejs/core</code> 里最后一批「常用而未读」的文件划掉。
+  </p>
+
+  <h2>24.1 provide/inject：原型链的一次妙用</h2>
+  <pre class="code" data-title="apiInject.ts（原文级别）"><code>// 每个组件初始化时：
+instance.provides = parent
+  ? parent.provides                       // ⭐ 原型继承父的 provides
+  : Object.create(appContext.provides);   // 根组件：以全局 provides 为原型
+
+export function provide(key, value) {
+  const currentInstance = getCurrentInstance();
+  if (currentInstance) {
+    currentInstance.provides[key] = value;   // 只是普通赋值！
+  }
+}
+
+export function inject(key, defaultValue) {
+  const instance = getCurrentInstance();
+  const provides = instance.parent?.provides;
+  if (key in provides) {
+    return provides[key];                    // 原型链自动向上找 → 「就近原则」白送
+  }
+  return defaultValue;
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 一行原型链 = 沿父链循环查找</span><br>
+    「子组件找注入值，先找最近的祖先」听起来要写「沿 parent 链一层层向上循环」——
+    但 <code class="inline">Object.create(parent.provides)</code> 把这层循环交给了 JS 引擎：
+    属性查不到就自动沿原型链上溯。<b>就近原则是原型链的天然属性</b>，不是写的逻辑。
+    官方仓库的 apiInject.ts 一共不到 60 行，是 runtime-core 里性价比最高的阅读材料。
+  </div>
+  
+  <div class="callout tip">
+    <span class="tag">💡 provide 的响应式语义</span><br>
+    provide 的 value 如果是 <b>ref / reactive</b>，注入侧拿到的是<b>同一个引用</b>（不脱壳、不拷贝）——
+    上游改值下游自动更新；官方建议「提供只读视图时配 readonly(ref)」：依赖可下传，写入权留在源头。
+    注入原始值则完全静态 —— 后续互不相干。所以约定俗成：provide 的 key 用大写常量、value 尽量给 ref。
+  </div>
+
+  <div class="callout warn">
+    <span class="tag">⚠️ 两处工程细节</span><br>
+    ① <code class="inline">appContext.provides</code> 用 <code class="inline">Object.create(null)</code> 创建 ——
+    不带 Object 原型，防止 'constructor' 这类 key 污染注入表；
+    ② inject 的 <code class="inline">key in provides</code> 判断（而非 <code class="inline">provides[key]</code> 取值判断）——
+    这样注入值为 <code class="inline">undefined</code> 和「未注入」才得以区分。
+  </div>
+
+  <h2>24.2 defineAsyncComponent：一个状态机包装器</h2>
+  <pre class="code" data-title="apiAsyncComponent.ts（教学版）"><code>export function defineAsyncComponent(source) {
+  // 真身是 defineComponent 包出来的包装组件；__asyncLoader 字段存的是「加载函数」本身
+  return defineComponent({
+    name: 'AsyncComponentWrapper',
+    __asyncLoader: load,
+    setup() {
+      // 官方用一组独立的 ref 表达状态（教学版收拢成 reactive 对象更好读）：
+      //   loaded ref —— 组件加载好了吗     error ref —— 失败信息
+      //   delay ref —— loading 延迟（默认 200ms）  timeout ref —— 超时打 errorComponent
+      const refs = reactive({
+        status: 'pending',           // pending → resolved / failed
+        error: null, loaded: 0,
+        delay: source.delay || 200, timeout: source.timeout,
+      });
+      // loader() 返回 Promise → then 记录组件、resolve；catch 进 failed
+      // setTimeout(delay)：显示 loadingComponent
+      // setTimeout(timeout)：超时打 errorComponent
+      // 失败还能 retry(() =&gt; loader())，配 onError 钩子
+      return () =&gt; {
+        if (refs.status === 'resolved') return h(resolvedComp, ...);
+        if (refs.status === 'failed' &amp;&amp; errorComp) return h(errorComp);
+        if (refs.status === 'pending' &amp;&amp; loadingComp &amp;&amp; refs.delayElapsed) return h(loadingComp);
+        return null;
+      };
+    },
+  });
+}</code></pre>
+  <p>
+    本质：一个<b>包装组件</b>，render 函数根据状态机的当前状态返回不同 vnode。
+    它和 Suspense 的分工：defineAsyncComponent 管「单个组件」的加载态，
+    Suspense 管「整棵依赖树」的等待态（含嵌套异步 setup）。
+  </p>
+
+  <h2>24.3 KeepAlive：缓存 vnode 的「第三个容器」</h2>
+  <p>
+    KeepAlive 是内置组件里最有意思的一个：它不渲染任何东西，只做「搬运工」。
+    三个核心机关（官方源码 <code class="inline">components/KeepAlive.ts</code>）：
+  </p>
+  <table>
+    <tr><th>机关</th><th>做法</th><th>为什么</th></tr>
+    <tr><td>① 缓存表</td><td><code class="inline">cache: Map&lt;key, vnode&gt;</code> + <code class="inline">keys: Set</code> 维护使用顺序，超 max 时驱逐最久未用</td><td>切回来不用重建，状态全在</td></tr>
+    <tr><td>② DOM 挪移</td><td>失活时把真实 DOM 从页面<b>移进</b>一个隐藏容器；激活时再<b>移回来</b></td><td>DOM 不销毁 → 状态、滚动位置、播放进度全部保留</td></tr>
+    <tr><td>③ patch 分流</td><td>processComponent 前先问 KeepAlive：缓存里有吗？有 → 激活旧 vnode，无 → 挂新的</td><td>配合 shouldUpdateComponent 决定走哪条路</td></tr>
+  </table>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox gray">切换 away</span>
+      <span class="farrow">→</span>
+      <span class="fbox rose">deactivated（不是 unmounted！）</span>
+      <span class="farrow">→</span>
+      <span class="fbox">DOM 移入隐藏容器 + vnode 入缓存</span>
+    </div>
+    <div class="flow" style="margin-top:10px">
+      <span class="fbox gray">切回来</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">activated（不是 mounted！）</span>
+      <span class="farrow">→</span>
+      <span class="fbox">缓存命中 → DOM 移回页面（LRU 顺手修剪）</span>
+    </div>
+    <div class="cap">所以被 KeepAlive 的组件生命周期是 activated/deactivated —— 因为 DOM 从未销毁，mounted 只会来一次</div>
+  </div>
+
+  <h2>24.4 Teleport：patch 的第二入口</h2>
+  <pre class="code" data-title="components/Teleport.ts（教学版）"><code>// vnode.type === Teleport 时，patch 走的不是 processElement/Component：
+function processTeleport(n1, n2, container, anchor) {
+  if (n1 == null) {
+    // 挂载：target = document.querySelector(to)
+    const target = (n2.target = querySelector(n2.props.to));
+    mountChildren(n2.children, target);        // ⭐ 直接把子元素挂到 target
+  } else {
+    // 更新：
+    n2.el = n1.el;
+    const target = (n2.target = querySelector(n2.props.to));
+    if (target !== n1.target) {                // ⭐ to 动态变了 → 整体搬走
+      moveTeleport(n2, target);
+    }
+    patchChildren(n1, n2, target);             // 正常 diff
+    if (n2.props.disabled !== n1.props.disabled) {  // ⭐ disabled 切换 → 搬回原位
+      toggleTeleportDisabled(n2);
+    }
+  }
+}</code></pre>
+  <p>
+    Teleport 破坏了一个假设：「子元素都渲染在父容器里」。为此官方把 patch 拆出了第二入口 ——
+    vnode 上带 <code class="inline">shapeFlag.TELEPORT</code>，进入 patch 时优先分流。
+    注意 mounted 的语义：Teleport 的 children 挂在 target 上，但<b>组件实例树不变</b> ——
+    逻辑树和 DOM 树在这里正式分家（第 16 章「VNode 树 ≠ 组件树」的进阶版）。
+  </p>
+
+  
+  <h2>24.5 Suspense：异步等待的「计数器 + 状态机」</h2>
+  <pre class="code" data-title="Suspense 的工作机制（源码级简化）"><code>// ① 约定：async setup() 返回的 Promise 存进 vnode 的 asyncDep
+//    （同步组件没有 asyncDep → Suspense 直接跳过它）
+// ② 挂载：初始化 suspense 实例：
+suspense = {
+  vnode,
+  deps: 0,                 // ⭐ 「未完成异步任务」计数器
+  pendingId: 0,            // 区分新旧内容的切换批次
+  isInFallback: false, ... // 当前显示的是不是 fallback 分支
+}
+// ③ 收集：渲染子树遇到 asyncDep → deps++，
+//    同时把「Promise 完成 → deps-- → 尝试 resolve」挂进 post 队列
+// ④ deps === 0 → resolve：切回默认插槽内容
+queuePostRenderEffect(() =&gt; { suspense.isInFallback = false; /* 切换显示 */ }, ...)
+// ⑤ 期间显示 fallback 插槽；resolved 后切默认插槽内容（24.4 的 enter 过渡可用）</code></pre>
+  <table>
+    <tr><th>成员</th><th>作用</th></tr>
+    <tr><td><code class="inline">deps 计数器</code></td><td>每个 async setup +1，resolve 后 -1；归零即「整棵子树就绪」</td></tr>
+    <tr><td><code class="inline">pendingId</code></td><td>区分旧内容卸载与新内容显示，防切换竞态</td></tr>
+    <tr><td>fallback / content 分支</td><td>就是两个普通插槽 vnode，走同一套 patch（18 章）</td></tr>
+    <tr><td>onResolve / onFallbackResolve</td><td>对外事件钩子，全部走 post 队列（第 23 章）</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 一句话本质</span><br>
+    Suspense 把「异步」从组件内部抽到组件树外：<b>子组件只管返回 Promise，等待与展示的编排交给
+    父级 Suspense 的计数器</b>。它和 defineAsyncComponent（24.2 单组件状态机）是同一问题的两个粒度 ——
+    一个管一棵树，一个管一个点。SSR 流式渲染（36.4）的占位机制，底层正是这个 pending 计数。
+  </div>
+
+
+  <h2>24.6 内置组件源码速查表</h2>
+  <table>
+    <tr><th>组件/能力</th><th>官方源码文件</th><th>核心思想（本站出处）</th></tr>
+    <tr><td>provide / inject</td><td><code class="inline">apiInject.ts</code></td><td>原型链查表 —— 就近原则白送（本章）</td></tr>
+    <tr><td>defineAsyncComponent</td><td><code class="inline">apiAsyncComponent.ts</code></td><td>状态机包装组件（本章）</td></tr>
+    <tr><td>KeepAlive</td><td><code class="inline">components/KeepAlive.ts</code></td><td>vnode 缓存 + DOM 挪移 + LRU（本章）</td></tr>
+    <tr><td>Teleport</td><td><code class="inline">components/Teleport.ts</code></td><td>patch 第二入口 + target 搬移（本章）</td></tr>
+    <tr><td>Suspense</td><td><code class="inline">components/Suspense.ts</code></td><td>异步任务计数 + post 队列切换（第 23 章）</td></tr>
+    <tr><td>Transition</td><td><code class="inline">components/BaseTransition.ts</code></td><td>钩子时机 + CSS 类切换（基于 patch 生命周期）</td></tr>
+  </table>
+
+  
+  <h2>24.7 KeepAlive 的三个工程细节</h2>
+  <table>
+    <tr><th>细节</th><th>规则</th><th>源码位置</th></tr>
+    <tr><td>缓存 key 怎么定</td><td><code class="inline">vnode.key == null ? comp : vnode.key</code> —— 同一组件的多个实例要靠 key 区分（否则互相串缓存）</td><td>KeepAlive.ts 的 cacheSubgraph / cache 建键</td></tr>
+    <tr><td>include/exclude 何时匹配</td><td>在 <b>processComponent 入口</b>就检查组件 name：不匹配 → 直接走普通挂载/卸载，<b>根本不进缓存体系</b></td><td>name 匹配函数（支持字符串/正则/数组）</td></tr>
+    <tr><td>LRU 驱逐时发生什么</td><td>超 max 时淘汰最久未用的：<b>如果它当前还挂在页面上</b> → 先搬运进隐藏容器再触发 deactivated；<b>已经不在页面</b> → 直接走完整 unmount</td><td>pruneCacheEntry</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 同组件多实例的缓存串台</span><br>
+    路由里用 <code class="inline">&lt;KeepAlive&gt;&lt;router-view /&gt;&lt;/KeepAlive&gt;</code> 缓存「同组件不同参数」的页面
+    （如 /user/1 和 /user/2 渲染同一个 User.vue）时，若不给 router-view 设置按路由分化的 key，
+    两页会共用一条缓存 —— 数据串台。原因就是上面的建键规则：key 缺省时以<b>组件对象</b>为准，
+    同一个组件对象自然只有一条缓存。解法：给 key 绑路由参数，让「身份」真的不同。
+  </div>
+
+  <h2>24.7 实战组合：KeepAlive + 路由缓存的标准姿势</h2>
+  <pre class="code" data-title="vue-router 的官方推荐写法"><code>&lt;RouterView v-slot="{ Component }"&gt;
+  &lt;KeepAlive :include="['Home', 'Detail']" :max="10"&gt;
+    &lt;component :is="Component" :key="$route.fullPath" /&gt;
+  &lt;/KeepAlive&gt;
+&lt;/RouterView&gt;</code></pre>
+  <table>
+    <tr><th>配置</th><th>作用</th><th>不写的后果</th></tr>
+    <tr><td><code class="inline">include</code></td><td>白名单：只有列名的组件进缓存（匹配组件 <code class="inline">name</code>）</td><td>所有页面缓存 → 表单页旧数据残留、逻辑错乱</td></tr>
+    <tr><td><code class="inline">max</code></td><td>LRU 上限，超出淘汰最久未访问（24.3 的机关①）</td><td>长会话内存持续增长</td></tr>
+    <tr><td><code class="inline">:key="$route.fullPath"</code></td><td>同组件不同参数（/detail/1 → /detail/2）视为不同实例</td><td>参数变了页面不刷新（组件复用但状态没重置）</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 onActivated 是缓存页的「每次都跑」钩子</span><br>
+    缓存页的 mounted 只来一次，数据刷新要写在 onActivated 里（每次切回都执行）。
+    常见模式：mounted 拉一次全量，onActivated 里只做轻量校验/滚动位置恢复 ——
+    这是「缓存 + 新鲜度」的平衡术。
+  </div>
+
+
+  <h2>24.8 组件通信七种武器：一张表选型</h2>
+  <table>
+    <tr><th>武器</th><th>方向</th><th>适用</th><th>反模式</th></tr>
+    <tr><td>props</td><td>父 → 子</td><td>一切数据下行</td><td>深层逐级转传（props 钻井）→ 换 provide</td></tr>
+    <tr><td>emit / v-model</td><td>子 → 父</td><td>事件上报 + 双向绑定（22.3 / 34.2）</td><td>emit 传对象让父改子内态 → 边界混乱</td></tr>
+    <tr><td>defineExpose + 模板 ref</td><td>父 → 子（命令式）</td><td>focus、滚动画布等「方法调用」（22.7）</td><td>拿 exposed 改子组件状态 → 应该用 props</td></tr>
+    <tr><td>provide / inject</td><td>祖先 → 子孙（跨层）</td><td>主题 / 用户 / 请求实例等「环境依赖」</td><td>拿它传业务数据 → 数据流不可追</td></tr>
+    <tr><td>slots（含作用域）</td><td>父渲染进子</td><td>内容定制（22.4）</td><td>用 slot 传数据 → 应该用 props</td></tr>
+    <tr><td>attrs 透传</td><td>父 → 子根元素</td><td>class / 事件的包装组件（22.2 / 22.6）</td><td>依赖它传业务 props</td></tr>
+    <tr><td>全局状态（pinia）</td><td>任意</td><td>跨页面共享状态</td><td>组件私有状态塞全局 → 内存与耦合双输</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 pinia 的底层你早就懂了</span><br>
+    全局状态库的本质 = <b>app.provide(storeKey, store) + reactive(store) + devtools 钩子</b>：
+    store 用 reactive（第 3 章）保响应，provide 保证全树可注入（24.1），effectScope 管订阅清理（第 10 章）。
+    学到这里，pinia 对你已是「透明盒子」—— 这就是读源码最大的回报。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：内置组件</summary>
+    <div class="quiz-body">
+      <p>1. 为什么 KeepAlive 包裹的组件用 activated 而不是 mounted 判断「被切回来了」？<br>
+         2. provide/inject 的「就近原则」为什么不需要写循环？<br>
+         3. Teleport 后子组件的父实例还成立吗？（比如 inject 还能用吗）</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. DOM 从未销毁 —— 组件实例一直活着，mounted 只在真正首次创建时触发一次；
+        切换只是 DOM 挪进/挪出隐藏容器，所以对应钩子是 deactivated/activated。<br>
+        2. instance.provides 的原型是 parent.provides，属性查找由 JS 引擎沿原型链自动上溯，
+        最近祖先的 provide 天然先被找到。<br>
+        3. 成立。Teleport 只搬 DOM，组件树（vnode 树 / 实例父子关系）完全不变，inject/provide 照常工作 ——
+        「逻辑树 ≠ DOM 树」。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="pin">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#scheduler"><span class="dir">上一章</span><span class="t">← 调度器：queueJob 与 nextTick</span></a>
+    <a class="next" href="runtime.html#fragment"><span class="dir">下一章</span><span class="t">Text / Fragment / 静态节点 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+<script src="assets/labs/common.js?v=1"></script>
+<script src="assets/labs/core.js?v=1"></script>
+</body>
+</html>

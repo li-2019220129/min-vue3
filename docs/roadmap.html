@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 收官</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 51 roadmap ============ -->
+<section class="page" id="page-roadmap">
+  <div class="kicker">第 51 章 · 收官</div>
+  <h1>结业：路线与彩蛋</h1>
+  <p class="lead">
+    恭喜你走完了全部 51 章 —— 从一个 isObject 到最长递增子序列，
+    从「为什么要有 .value」到「编译器如何反哺运行时」。
+    最后这一章：一张知识地图帮你收拢记忆，一条进阶路线帮你继续前行。
+  </p>
+
+  <h2>51.1 一张图收拢全书</h2>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">reactive.ts</span>
+        <span class="farrow">+</span>
+        <span class="fbox gray">baseHandler.ts</span>
+        <span class="farrow">→</span>
+        <span class="fbox">Proxy 拦截 get/set</span>
+      </div>
+      <div class="flow">
+        <span class="fbox blue">get → track</span>
+        <span class="farrow">＋</span>
+        <span class="fbox blue">activeEffect 指针</span>
+        <span class="farrow">→</span>
+        <span class="fbox">三层名册登记<br><small>WeakMap·Map·Map</small></span>
+      </div>
+      <div class="flow">
+        <span class="fbox rose">set → trigger</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">scheduler</span>
+        <span class="farrow">→</span>
+        <span class="fbox">重跑 / 标脏 / 回调</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">trackId + depsLength</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">增量清理过期依赖</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">ref：原始值的盒子</span>
+        <span class="fbox">computed：脏标记缓存</span>
+        <span class="fbox">watch：scheduler 变回调</span>
+        <span class="fbox">scope：批量记账</span>
+      </div>
+      <div class="flow">
+        <span class="fbox blue">nodeOps + patchProp</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">注入 createRenderer</span>
+        <span class="farrow">→</span>
+        <span class="fbox">跨平台渲染（invoker 待客之道）</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">h() 造 vnode</span>
+        <span class="farrow">→</span>
+        <span class="fbox">mount 挂载</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">patch / diff / LIS</span>
+      </div>
+      <div class="flow">
+        <span class="fbox blue">组件 = render 包进 effect</span>
+        <span class="farrow">＋</span>
+        <span class="fbox blue">queueJob 异步批量</span>
+        <span class="farrow">→</span>
+        <span class="fbox">✨ 数据驱动视图闭环</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">createApp → mount</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">微任务 flush 批处理</span>
+        <span class="farrow">→</span>
+        <span class="fbox">第一个像素 &amp; nextTick</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">provide/inject：原型链</span>
+        <span class="fbox">KeepAlive：缓存 + DOM 挪移</span>
+        <span class="fbox">Teleport：patch 分流</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">Text/Fragment：锚点定位</span>
+        <span class="fbox">指令：七个钩子借 patch 时机</span>
+        <span class="fbox">Transition：切 class + 掐表</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">tokenizer 状态机</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">transform 洋葱模型</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">codegen 印刷厂</span>
+        <span class="farrow">→</span>
+        <span class="fbox">语法糖 = 编译期展开</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">错误：包装调用 + 父链上溯</span>
+        <span class="fbox">SSR：换台发动机 + hydrate</span>
+        <span class="fbox">nodeOps 注入 = 任意画布</span>
+      </div>
+      <div class="flow">
+        <span class="fbox">编译器：静态提升 + patchFlag + Block</span>
+        <span class="farrow">→</span>
+        <span class="fbox">性能八招：识别不变量，跳过它</span>
+      </div>
+    </div>
+  </div>
+
+  <h2>51.2 继续进阶：把 mini-vue3 写完</h2>
+  <div class="roadmap">
+    <div class="rstep now">
+      <h4><span class="st done">已完成</span>响应式系统 reactivity（第 2~14 章全覆盖）</h4>
+      <p>effect / reactive / ref / computed / watch / effectScope / 全家桶 / Set-Map 拦截器 / 官方 3.5 版精读 —— 理论与实现双视角通透。</p>
+    </div>
+    <div class="rstep now">
+      <h4><span class="st done">已完成</span>渲染器与组件理论（第 15~24 章）+ 深水区（25~29 章）</h4>
+      <p>h / mount / diff / 组件化 / Block Tree / 启动 / 调度 / 内置组件 —— 教学实现全部在手。</p>
+    </div>
+    <div class="rstep now">
+      <h4><span class="st done">已完成</span>编译器与边界（第 30~37 章）+ 生态与工程（38~43 章）</h4>
+      <p>parse / transform / codegen / 语法糖 / 错误处理 / SSR / 自定义渲染器 / HMR / devtools / Router / Pinia / VueUse / 测试。</p>
+    </div>
+    <div class="rstep">
+      <h4><span class="st todo">施工①</span>第 44 章 渲染器主体</h4>
+      <p>把 patch / processElement / mountElement / patchChildren 抄进 runtime-core，跑通第一个计数器 —— 带验收测试。</p>
+    </div>
+    <div class="rstep">
+      <h4><span class="st todo">施工②</span>第 45 章 Text / Fragment / 静态节点</h4>
+      <p>补全 vnode 族的其余成员，多根模板从此可用。</p>
+    </div>
+    <div class="rstep">
+      <h4><span class="st todo">施工③</span>第 46 章 指令与 Transition</h4>
+      <p>withDirectives 四个触发点 + 内置三指令 + enter/leave class 时间线。</p>
+    </div>
+    <div class="rstep">
+      <h4><span class="st todo">施工④</span>第 47 章 调度器与组件三大件</h4>
+      <p>生产级 queueJob（排序 + pre/post 队列 + nextTick）+ initProps / emit / initSlots —— 真正的组件树。</p>
+    </div>
+    <div class="rstep">
+      <h4><span class="st todo">施工⑤</span>第 48 章 集合拦截器与收官</h4>
+      <p>补上最后一块拼图，全家福测试全绿 —— 你的 mini-vue3 与官方同构。</p>
+    </div>
+    <div class="rstep">
+      <h4><span class="st todo">朝圣</span>对照官方仓库 vuejs/core</h4>
+      <p>带着全部理解去读正式版，从 <code class="inline">__tests__</code> 开始（第 43 章），90% 似曾相识 —— 先爬小山，再登珠峰。</p>
+    </div>
+  </div>
+
+  <h2>51.3 彩蛋：本站发现的三处源码彩蛋</h2>
+  <ul>
+    <li><b>拼写彩蛋</b>：<code class="inline">tarckEffect</code>（track 的手滑版）—— 读源码别迷信，作者也是人。</li>
+    <li><b>作业彩蛋</b>：RefImpl 的 set 里少了一次 <code class="inline">toReactive(newValue)</code>（第 7 章），修掉它，你就给这个项目提了第一个 PR 级别的改动。</li>
+    <li><b>侦探彩蛋</b>：traverse 里 <code class="inline">if (isObject(source)) return source</code> 会让对象从不被深度遍历（第 50 章 Q24 揭晓）—— 对照官方源码，看看你能不能先于面试官发现它。</li>
+  </ul>
+
+  <h2>51.4 下一站：Vue 3.6 正在路上</h2>
+  <p>
+    本站写作时（2026 年 9 月），官方最新稳定版是 <code class="inline">v3.5.43</code>，
+    而 <b>Vue 3.6 已经进入 RC 阶段</b> —— 它是继 3.4/3.5 之后的第三次响应式大手术，两件大事：
+  </p>
+  <table>
+    <tr><th>新变化</th><th>是什么</th><th>与本站所学的关系</th></tr>
+    <tr>
+      <td><b>alien-signals 响应式重写</b></td>
+      <td>reactivity 核心基于 <code class="inline">alien-signals</code>（StackBlitz 的高性能信号库）推倒重写，
+        精度高、内存占用更低；对外 API（ref / computed / watch）几乎不变</td>
+      <td>API 不变 = 你在第 2~12 章学的心智模型全部有效；
+        内核从「双向链表 + 版本计数」（第 14 章）换成 push-pull 信号图 —— 这已经是响应式内核的第四代实现，
+        也再次验证了第 6 章那句话：<b>思想不变，换载体而已</b></td>
+    </tr>
+    <tr>
+      <td><b>Vapor 模式</b></td>
+      <td>组件加 <code class="inline">&lt;script setup vapor&gt;</code> 即可<strong>完全去掉虚拟 DOM</strong>：
+        编译器直接生成「精确到操作」的更新代码，不再有 vnode 和 diff</td>
+      <td>你学的 patch / diff / Block Tree（第 15~20 章）仍然驱动着非 Vapor 组件；
+        Vapor 则把第 30 章「编译反哺运行时」推到极限 —— 编译期直接知道「改哪个节点」，运行时连 patch 都省了</td>
+    </tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 三代内核一条线</span><br>
+    3.0~3.3「Set + effectStack」→ 3.4「双向链表」→ 3.5「链表 + 版本计数」→ 3.6「alien-signals」。
+    四代实现，服务的是同一个不变量：<b>「读取时登记，写入时通知，值没变不打扰」</b>。
+    这就是为什么本站敢用 450 行教学实现带你入门 —— 学的是骨架，
+    骨架在，肌肉怎么换你都能一眼看懂。3.6 正式发布后，欢迎回到第 14 章做一次「三代对照精读」。
+  </div>
+
+  <blockquote>
+    源码不是用来背的，是用来「哦——原来如此」的。<br>
+    51 章、15 个实验室、27 道面试题 —— 你已经拥有了拆开任何框架的手术刀。<br>
+    现在打开编辑器，把实验室里的每一行再敲一遍吧。下次见 👋
+  </blockquote>
+
+  <button class="read-btn" data-page="roadmap">✓ 标记本章已读（点亮全部进度！）</button>
+  <div class="pager">
+    <a class="prev" href="masters.html#interview"><span class="dir">上一章</span><span class="t">← 面试通关：分级题库</span></a>
+    <a class="next" href="reactivity.html#track"><span class="dir">复习</span><span class="t">🧪 回到响应式实验室再玩一次 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+</body>
+</html>

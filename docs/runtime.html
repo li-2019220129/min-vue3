@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 运行时深水区</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 25 fragment ============ -->
+<section class="page" id="page-fragment">
+  <div class="kicker">第 25 章 · 运行时深水区</div>
+  <h1>Text / Fragment / 静态节点：vnode 族的其余成员</h1>
+  <p class="lead">
+    前 17 章的渲染器只认「元素」和「组件」两种 vnode —— 这是教学用的砍柴版。
+    真实的 patch 入口是一条完整的分流链：Text、Comment、Fragment、Teleport、Suspense、KeepAlive……
+    本章把谱系补全，顺带解开你写多根模板时 Vue 帮你垫的背锅行为。
+  </p>
+
+  <h2>25.1 patch 分流的完整版</h2>
+  <p>把第 19 章的简化分流升级成官方的样子（<code class="inline">renderer.ts</code> 的 patch 开头）：</p>
+  <pre class="code" data-title="patch 的完整分流（源码级简化）"><code>const { type, ref, shapeFlag } = n2;
+switch (type) {
+  case Text:        processText(n1, n2, container, anchor); break;      // 纯文本
+  case Comment:     processCommentNode(...); break;                     // 注释节点
+  case Static:      if (n1 == null) mountStaticNode(n2, container); break; // 静态提升节点
+  case Fragment:    processFragment(n1, n2, container, anchor); break;  // 多根容器
+  default:
+    if (shapeFlag &amp; ShapeFlags.TELEPORT) { (optimize ? teleport : teleportImpl)(...); }
+    else if (shapeFlag &amp; ShapeFlags.SUSPENSE) { processSuspense(...); }
+    else if (shapeFlag &amp; ShapeFlags.STATEFUL_COMPONENT) { processComponent(...); }  // 第 19 章
+    else if (shapeFlag &amp; ShapeFlags.ELEMENT) { processElement(...); }               // 第 17 章
+}</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 为什么用 shapeFlag 而不是继续 switch？</span><br>
+    一个节点可能同时是「元素 + 带子组件插槽 + 需要 hydration」—— 位运算的
+    <code class="inline">shapeFlag &amp; ShapeFlags.XXX</code> 让多种身份可以共存于一个数字（第 16 章的 32 个布尔值），
+    而 switch 只能表达「单选」。这是「一个数字背多个旗标」的经典应用。
+  </div>
+
+  <h2>25.2 Text：最简单的 vnode</h2>
+  <pre class="code" data-title="processText（renderer.ts 原文级别）"><code>function processText(n1, n2, container, anchor) {
+  if (n1 == null) {
+    // 挂载：创建文本节点并记录 el
+    n2.el = hostCreateText(n2.children as string);
+    hostInsert(n2.el, container, anchor);
+  } else {
+    // 更新：内容变了才调 hostSetText（改 nodeValue，零 diff 成本）
+    const el = (n2.el = n1.el!);
+    if (n2.children !== n1.children) {
+      hostSetText(el, n2.children as string);
+    }
+  }
+}</code></pre>
+  <p>
+    注意 Text 节点<b>没有 children 数组、没有 patchFlag 分支</b> —— 文本更新就是一次
+    <code class="inline">nodeValue</code> 赋值。这也是为什么模板里的纯文本插值编译后走的是
+    <code class="inline">createTextVNode</code> 通道（对比元素内文本是 setElementText）。
+  </p>
+
+  <h2>25.3 Fragment：多根模板的「隐形容器」</h2>
+  <p>
+    Vue3 允许组件有多个根节点，但 vnode 树必须单根才能递归 —— 于是编译器给多根模板包一层
+    <code class="inline">Fragment</code>：一个<b>不渲染任何 DOM、只当定位锚</b>的假节点。
+  </p>
+  <pre class="code" data-title="processFragment（教学完整版）"><code>function processFragment(n1, n2, container, anchor) {
+  // Fragment 没有 el！它靠「前后锚点」占位
+  const fragmentStartAnchor = (n2.el = hostCreateText(''));
+  const fragmentEndAnchor = (n2.anchor = hostCreateText(''));
+  if (n1 == null) {
+    hostInsert(fragmentStartAnchor, container, anchor);
+    hostInsert(fragmentEndAnchor, container, anchor);
+    mountChildren(n2.children, container, fragmentEndAnchor, anchor);  // 挂在两锚之间
+  } else {
+    patchChildren(n1, n2, container, fragmentEndAnchor, anchor);       // 第 18 章 diff
+  }
+}
+// 卸载时：removeFragment 从 startAnchor 沿 nextSibling 一路删到 endAnchor</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 anchor（锚点）是渲染器的隐形骨架</span><br>
+    第 17 章你见过 anchor 决定 insertBefore 的位置，当时觉得它可有可无 ——
+    到 Fragment 这里它成了<b>唯一能标记「我哪些孩子」的手段</b>（因为 Fragment 自己不产生元素）。
+    官方代码里 anchor 参数贯穿所有 process 函数，就是这个原因：diff 移动节点、Fragment 卸载、
+    Teleport 搬家，全都靠锚点定位。
+  </div>
+  <div class="callout warn">
+    <span class="tag">⚠️ 多根组件的「锅」：attrs 没地方透传了</span><br>
+    第 22 章说过 attrs 默认合并到「根元素」。多根组件没有唯一的根 —— 所以 Vue 只能
+    警告 <code class="inline">Extraneous non-props attributes (class) were passed to component but could not be automatically inherited</code>，
+    要求你 <code class="inline">inheritAttrs: false</code> + 手动 v-bind="$attrs"。
+    面试问「多根组件有什么代价」，答到 attr 透传失效 + 每个根都要 diff（无 el 复用）就到位了。
+  </div>
+
+  <h2>25.4 Static：静态提升节点的「免检通道」</h2>
+  <p>
+    编译器把纯静态子树提升为常量 vnode（第 30 章）。运行时它以 <code class="inline">Static</code>
+    类型出现，挂载时一次性 innerHTML 灌入，<b>组件更新时直接跳过 —— 永不 diff</b>：
+  </p>
+  <pre class="code" data-title="静态节点的免检逻辑（patch 内）"><code>const isSameVNodeType = (n1, n2) =&gt;
+  n1.type === n2.type &amp;&amp; n1.key === n2.key;
+// 而 Static 节点更绝：patch 开头有一步 ——
+if (n2.shapeFlag &amp; ShapeFlags.ELEMENT &amp;&amp; n2.patchFlag === HOISTED /* -1 */) {
+  // 静态节点：把旧 el 直接「过继」给新 vnode，连 props 都不比
+  n2.el = n1.el;
+  n2.component = n1.component;
+  if (n2.transition) setTransitionHooks(n2, n2.transition);
+  n2.dirs &amp;&amp; (n2.dirs = ...);   // 静态节点若带指令才需要少量处理
+  return;                        // ⭐ 直接返回，整棵子树免检
+}</code></pre>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox gray">编译器：识别静态子树</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">提升为常量 + patchFlag = -1</span>
+      <span class="farrow">→</span>
+      <span class="fbox">运行时：el 过继 + return</span>
+      <span class="farrow">→</span>
+      <span class="fbox rose">整棵子树零 diff 成本</span>
+    </div>
+    <div class="cap">编译期标注 + 运行时免检 —— 「编译反哺运行时」最纯粹的一个例子（第 30 章展开）</div>
+  </div>
+
+  
+  <h2>25.5 无 key 的另一条路：patchUnkeyedChildren</h2>
+  <p>第 18 章讲的五步预处理 + LIS 是「有 key」的豪华版。官方 patchChildren 里其实有两条路：</p>
+  <pre class="code" data-title="patchChildren 的分岔（renderer.ts）"><code>if (shapeFlag &amp; TEXT_CHILDREN) { ... }        // 文本子节点线
+else {
+  if (shapeFlag &amp; ARRAY_CHILDREN) {
+    if (prevShapeFlag &amp; ARRAY_CHILDREN) {
+      // 新旧都是数组：⭐ 分岔点
+      patchFlag &amp; PatchFlags.KEYED_FRAGMENT
+        ? patchKeyedChildren(...)              // 有 key：五步预处理 + LIS（第 18 章）
+        : patchUnkeyedChildren(...);           // 无 key：按下标对齐
+    } else { ... 挂载新数组 ... }
+  }
+}
+
+function patchUnkeyedChildren(c1, c2, container, anchor) {
+  const commonLength = Math.min(c1.length, c2.length);
+  for (let i = 0; i &lt; commonLength; i++) {     // ① 重叠区：下标对齐，就地 patch
+    patch(c1[i], c2[i], container, anchor);
+  }
+  if (c2.length &gt; c1.length) {                 // ② 新的多：批量挂
+    mountChildren(c2, container, anchor, i);
+  } else {                                     // ③ 旧的多：批量卸
+    unmountChildren(c1, container, anchor, i);
+  }
+}</code></pre>
+  <table>
+    <tr><th>维度</th><th>有 key（Keyed）</th><th>无 key（Unkeyed）</th></tr>
+    <tr><td>对齐方式</td><td>key 映射 + LIS 最少移动</td><td>纯下标对齐</td></tr>
+    <tr><td>移动 DOM？</td><td>会（最优移动方案）</td><td>从不移动</td></tr>
+    <tr><td>删除中间项的代价</td><td>其余节点身份不变，状态保留</td><td>后续节点全部错位 patch，<b>状态串位</b></td></tr>
+    <tr><td>适合</td><td>列表项有状态 / 顺序会变</td><td>纯展示、不增删、只改值的小列表</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 原来如此</span><br>
+    「v-for 不加 key 会怎样」的正解不是「一定错」，而是「走 unkeyed 路径」——
+    只改值的静态小列表反而更快（省掉建映射表）。但只要列表<b>会增删或项内有状态</b>，
+    下标对齐就会把 A 的状态 patch 给 B —— 这才是 index 当 key 反模式的全貌（第 18.5 节追问二）。
+  </div>
+
+  <h2>25.5 keyed Fragment：template v-for 的编译形态</h2>
+  <p>
+    14 章说过「VNode 树 ≠ 组件树」，这里补一个 Fragment 与编译器的会合点：
+    多根的 <code class="inline">v-for</code>（比如 <code class="inline">&lt;template v-for&gt;</code>），
+    编译产物就是一个<b>带 key 的 Fragment</b>：
+  </p>
+  <pre class="code" data-title="模板 → 产物对照"><code>// 模板：
+&lt;template v-for="item in list" :key="item.id"&gt;
+  &lt;h4&gt;{{ item.title }}&lt;/h4&gt;
+  &lt;p&gt;{{ item.body }}&lt;/p&gt;
+&lt;/template&gt;
+
+// 编译产物（简化）：
+(_openBlock(true), _createBlock(_Fragment, { key: item.id }, [
+  _createVNode("h4", null, ...), _createVNode("p", null, ...)
+], 128 /* KEYED_FRAGMENT */))</code></pre>
+  <table>
+    <tr><th>Fragment 的 patchFlag</th><th>含义</th><th>运行时待遇</th></tr>
+    <tr><td><code class="inline">STABLE_FRAGMENT (64)</code></td><td>子项顺序与内容稳定（源数据顺序不变）</td><td>跳过自身 children 的全量 diff，只补动态点</td></tr>
+    <tr><td><code class="inline">KEYED_FRAGMENT (128)</code></td><td>带 key 的动态列表</td><td>走完整 patchKeyedChildren（18 章）</td></tr>
+    <tr><td><code class="inline">UNKEYED_FRAGMENT (256)</code></td><td>没给 key</td><td>patchUnkeyedChildren：按下标就地 patch（移动不识别）</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么说 Fragment 也是 Block 边界</span><br>
+    25 章的 Block Tree 里，结构化指令（v-if/v-for）会「打断」静态收集链 ——
+    因为它们可能改变子树结构。v-for 编译出的 keyed Fragment 正是 Block 体系的一员：
+    dynamicChildren 的收集以它为界重新开始。运行时（本章）与编译时（30 章）在这里握手。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：vnode 族的其余成员</summary>
+    <div class="quiz-body">
+      <p>1. Fragment 自己没有 el，diff 时怎么知道该更新哪些节点？卸载时呢？<br>
+         2. 为什么静态 vnode 更新时连 props 都不用比？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 靠两个文本锚点（startAnchor / endAnchor）：挂载时把 children 挂在两锚之间，更新时对
+        (n1, n2) 跑 patchChildren；卸载时从 startAnchor 沿 nextSibling 一路删到 endAnchor。<br>
+        2. 因为静态节点的内容在编译期就被证明「永不变化」（静态提升的前提）—— 信任编译器的标注
+        （patchFlag = -1），运行时直接复用旧 el。运行时优化都是编译期信息的兑现。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="fragment">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="core.html#pin"><span class="dir">上一章</span><span class="t">← provide/inject 与内置组件</span></a>
+    <a class="next" href="#directives"><span class="dir">下一章</span><span class="t">自定义指令：七个钩子 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 26 directives ============ -->
+<section class="page" id="page-directives">
+  <div class="kicker">第 26 章 · 运行时深水区</div>
+  <h1>自定义指令：七个钩子的生命周期</h1>
+  <p class="lead">
+    <code class="inline">v-focus</code>、<code class="inline">v-loading</code>、<code class="inline">v-permission</code> ——
+    自定义指令是「直接操作 DOM 的合法通道」。它的实现是 patch 流程里一次漂亮的寄生：
+    指令对象挂在 vnode 上，生命周期钩子借组件更新的时机被顺路调用。
+    官方源码位置：<code class="inline">runtime-core/src/directives.ts</code> + renderer 里的 <code class="inline">dirs</code> 触发点。
+  </p>
+
+  <h2>26.1 一个指令的七个钩子</h2>
+  <table>
+    <tr><th>钩子</th><th>触发时机</th><th>典型用途</th></tr>
+    <tr><td><code class="inline">created</code></td><td>vnode 创建后、元素属性处理前</td><td>需要在属性生效前改元素（如 v-model 防抖绑定）</td></tr>
+    <tr><td><code class="inline">beforeMount</code></td><td>挂载前</td><td>准备资源</td></tr>
+    <tr><td><code class="inline">mounted</code></td><td>挂载后（post 队列！）</td><td>focus、初始化第三方库</td></tr>
+    <tr><td><code class="inline">beforeUpdate</code></td><td>更新前（同步调用）</td><td>记录旧值</td></tr>
+    <tr><td><code class="inline">updated</code></td><td>更新后（post 队列）</td><td>基于新旧值操作 DOM</td></tr>
+    <tr><td><code class="inline">beforeUnmount</code> / <code class="inline">unmounted</code></td><td>卸载前 / 后</td><td>清理监听器、销毁实例</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 时机眼熟吗？</span><br>
+    「mounted/updated 走 post 队列，beforeUpdate 同步跑」—— 正是第 23 章调度器的 pre/post 工序。
+    指令钩子没有任何自己的调度机制，全部借宿主 vnode 的 patch 时机。
+  </div>
+
+  <h2>26.2 withDirectives：把指令挂上 vnode</h2>
+  <p>
+    模板里的 <code class="inline">v-my-dir="x"</code> 编译后变成对
+    <code class="inline">withDirectives(h(...), [[myDir, x]])</code> 的调用：
+  </p>
+  <pre class="code" data-title="withDirectives（directives.ts 原文级别）"><code>export function withDirectives(vnode, dirs) {
+  const internalInstance = currentRenderingInstance;   // 当前正在渲染的组件
+  if (internalInstance === null) return vnode;
+
+  const bindings = vnode.dirs || (vnode.dirs = []);
+  for (let i = 0; i &lt; dirs.length; i++) {
+    let [dir, value, arg, modifiers = EMPTY_OBJ] = dirs[i];
+    if (dir) {
+      if (isFunction(dir)) dir = { mounted: dir, updated: dir };  // ⭐ 简写形式
+      bindings.push({
+        dir,
+        instance: internalInstance,   // 指令所在组件实例（钩子第 4 个参数）
+        value, oldValue: void 0,
+        arg, modifiers,
+      });
+    }
+  }
+  return vnode;
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 value 的响应式从哪来？</span><br>
+    <code class="inline">value</code> 是 render 函数执行时取到的当前值 —— render 在 effect 里，
+    所以「value 变了指令要更新」靠的是<b>组件重渲染</b>，而不是指令自己被 track。
+    这就是为什么指令钩子里的 oldValue/newValue 只在组件因别的原因更新时才刷新 ——
+    指令不是独立的响应式订阅者。
+  </div>
+
+  <h2>26.3 触发点：patch 流程里的四处「顺路调用」</h2>
+  <pre class="code" data-title="renderer.ts 中 dirs 的触发点（摘录）"><code>// mountElement 里（挂载线）：
+if (dirs) invokeDirectiveHook(n2, null, parentComponent, 'beforeMount');   // 同步
+queuePostRenderEffect(() =&gt; dirs[i].mounted(el, binding, vnode, null), parentInstance);  // post 队列
+
+// patchElement 里（更新线）：
+if (dirs) invokeDirectiveHook(n2, n1, parentComponent, 'beforeUpdate');    // 同步（旧值还在）
+queuePostRenderEffect(() =&gt; dirs[i].updated(el, binding, vnode, prevVNode), parentInstance);
+
+// unmount 里（卸载线）：
+dirs &amp;&amp; invokeDirectiveHook(vnode, null, parentComponent, 'beforeUnmount');  // 同步
+queuePostRenderEffect(() =&gt; dirs[i].unmounted(...), parentInstance);        // post 队列
+
+// invokeDirectiveHook = 遍历 vnode.dirs 调对应钩子（包上错误处理，第 35 章）</code></pre>
+  <div class="callout warn">
+    <span class="tag">⚠️ beforeUpdate 同步、updated 异步的用意</span><br>
+    beforeUpdate 必须在 <b>props/子节点更新前</b>同步跑 —— 你的指令要在这一刻拿到「还没被覆盖的旧 DOM 状态」；
+    updated 则等 DOM 真的更新完（post 队列）再跑 —— 你操作到的必然是新 DOM。
+    和组件生命周期 beforeUpdate/updated 完全同构，因为它们本来就是同一套队列工序。
+  </div>
+
+  <h2>26.4 最好的例子：v-model 就是个指令</h2>
+  <pre class="code" data-title="vModelText（runtime-dom 的 src/directives/vModelText.ts，精简）"><code>export const vModelText = {
+  created(el, { modifiers: { lazy, trim, number } }, vnode) {
+    el.addEventListener(lazy ? 'change' : 'input', (e) =&gt; {   // ⭐ 事件监听在 created 挂
+      let value = el.value;
+      if (trim) value = value.trim();
+      if (number) value = looseToNumber(value);
+      el._assign(value);          // 回写数据（就是 emit update:modelValue）
+    });
+    // ...
+  },
+  beforeUpdate(el, { value, oldValue }, vnode) {
+    el._assign = getModelAssigner(vnode);
+    if (document.activeElement === el &amp;&amp; value === oldValue) return;  // ⭐ 正在输入时不覆盖
+    el.value = value;              // 数据 → 视图
+  },
+};</code></pre>
+  <p>
+    现在你能读懂它了：created 里挂事件（数据 ← 视图），beforeUpdate 里回写（视图 ← 数据 + 输入中防覆盖）。
+    <b>「双向绑定」没有任何魔法，就是一个 指令 = 两个方向的同步代码</b> —— 第 34 章会看它的编译产物。
+  </p>
+
+  
+  <h2>26.5 三个实战轮子：copy / lazy / permission</h2>
+  <p>原理讲完，来三个能直接抄进项目用的轮子，每个都只用到了本章的钩子机制：</p>
+  <pre class="code" data-title="v-copy：点击复制"><code>const vCopy = {
+  mounted(el, { value }) {
+    el.$copy = () =&gt; navigator.clipboard.writeText(value);
+    el.addEventListener('click', el.$copy);
+  },
+  updated(el, { value }) { el.$copy = () =&gt; navigator.clipboard.writeText(value); },
+  unmounted(el) { el.removeEventListener('click', el.$copy); },  // ⭐ 必须：防内存泄漏
+};</code></pre>
+  <pre class="code" data-title="v-lazy：进入视口才加载图片"><code>const vLazy = {
+  mounted(el, { value }) {
+    const io = new IntersectionObserver(([entry]) =&gt; {
+      if (entry.isIntersecting) {
+        el.src = value;              // 进入视口 → 才赋真地址
+        io.disconnect();             // 一次性：加载完就断开观察
+      }
+    });
+    io.observe(el);
+    el.$io = io;
+  },
+  unmounted(el) { el.$io?.disconnect(); },
+};</code></pre>
+  <pre class="code" data-title="v-permission：无权限直接移除元素"><code>const vPermission = {
+  mounted(el, { value }) {
+    if (!userStore.permissions.includes(value)) {
+      el.parentNode?.removeChild(el);   // ⭐ 移除而非 display:none：DOM 里不该有的就别有
+    }
+  },
+};</code></pre>
+  <div class="callout warn">
+    <span class="tag">⚠️ 指令三守则</span><br>
+    ① <b>unmounted 必须清理</b>（监听器/Observer/定时器）—— 指令寄生在元素的卸载线上，你不删它就泄漏；
+    ② 操作尽量幂等（updated 钩子会反复跑）；③ 能用 computed/props 解决的别用指令 ——
+    指令是「直接摸 DOM」的逃生门，不是首选工具。
+  </div>
+
+  <h2>26.5 你天天在用的内置指令：一半是指令，一半是编译器</h2>
+  <table>
+    <tr><th>指令</th><th>实现层</th><th>实现方式</th></tr>
+    <tr><td><code class="inline">v-show</code></td><td>运行时指令</td><td><code class="inline">beforeMount: el._vod = el.style.display</code> 存原值；更新时 <code class="inline">el.style.display = value ? el._vod : 'none'</code> —— 就是普通指令对象！</td></tr>
+    <tr><td><code class="inline">v-html</code></td><td>运行时指令</td><td><code class="inline">el.innerHTML = value</code>（源码注释里那行 XSS 警告就是在这）</td></tr>
+    <tr><td><code class="inline">v-text</code></td><td>运行时指令</td><td><code class="inline">el.textContent = value</code></td></tr>
+    <tr><td><code class="inline">v-pre</code></td><td>编译器</td><td>标记节点及其子树「跳过编译」，<code class="inline">{{ }}</code> 原样输出 —— 编译产物里不存在</td></tr>
+    <tr><td><code class="inline">v-once</code></td><td>编译器</td><td>vnode 打上缓存标记，更新时直接复用首次 vnode（配合 25.4 静态免检）</td></tr>
+    <tr><td><code class="inline">v-cloak</code></td><td>编译器 + CSS</td><td>运行时编译场景防 <code class="inline">{{ }}</code> 闪烁：挂载前元素带 cloak 属性，配 CSS 隐藏</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 v-show 和 v-if 的区别，本质是「指令 vs 结构」</span><br>
+    v-show 是<b>指令</b>：只改 style.display，元素永远在、切换零创建成本（第 49 章性能八招的深层原因）；
+    v-if 是<b>结构化指令</b>：编译成条件表达式（32 章），切换 = 真实的挂载/卸载。
+    「运行时指令只操作既有元素，编译期指令改变 vnode 结构」—— 一句话分清所有内置指令。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：自定义指令</summary>
+    <div class="quiz-body">
+      <p>1. 指令的 mounted 为什么要在 post 队列跑，而不是挂载时立刻调？<br>
+         2. 指令 value 变化后钩子为什么会执行？是指令自己订阅了数据吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. mounted 的语义是「DOM 已上屏」。若同步调用，元素可能还在父级的挂载流程中（比如还没插入最终位置）；
+        post 队列保证整棵子树 patch 完毕后统一执行 —— 和组件 onMounted 同一套机制。<br>
+        2. 不是。指令 value 是 render 执行时求值的快照；数据变化 → 触发组件重渲染 → 新 vnode 带
+        新 value → patchElement 顺路调用指令 updated。指令从不自己 track 数据。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="directives">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#fragment"><span class="dir">上一章</span><span class="t">← Text / Fragment / 静态节点</span></a>
+    <a class="next" href="#transition"><span class="dir">下一章</span><span class="t">Transition：进出场原理 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 27 transition ============ -->
+<section class="page" id="page-transition">
+  <div class="kicker">第 27 章 · 运行时深水区</div>
+  <h1>Transition：进出场原理</h1>
+  <p class="lead">
+    <code class="inline">&lt;Transition&gt;</code> 组件自己不渲染任何东西，它是「给挂载/卸载动作插播动画」的调度器：
+    在该进场的元素出现前后 <b>切换 6 个 CSS class</b>，并监听 <code class="inline">transitionend</code> 确认动画结束。
+    动画本身 100% 交给浏览器 —— Vue 只负责掐表。
+    官方源码：<code class="inline">runtime-core/src/components/BaseTransition.ts</code>。
+  </p>
+
+  <h2>27.1 六个 class 的切换时刻表</h2>
+  <table>
+    <tr><th>阶段</th><th>进入（enter）</th><th>离开（leave）</th></tr>
+    <tr><td>开始前一帧</td><td><code class="inline">v-enter-from</code> + <code class="inline">v-enter-active</code></td><td><code class="inline">v-leave-from</code> + <code class="inline">v-leave-active</code></td></tr>
+    <tr><td>下一帧（rAF）</td><td>移除 <code class="inline">v-enter-from</code>、加上 <code class="inline">v-enter-to</code>（开始过渡）</td><td>移除 <code class="inline">v-leave-from</code>、加上 <code class="inline">v-leave-to</code>，并把元素留在页面上</td></tr>
+    <tr><td>过渡结束</td><td>移除 <code class="inline">v-enter-to</code> 和 <code class="inline">v-enter-active</code>，恢复干净</td><td>移除 <code class="inline">v-leave-to</code> / <code class="inline">v-leave-active</code> → <b>真正移除元素</b>（「缓刑」结束）</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么「先加 from、下一帧再删」？</span><br>
+    CSS transition 的触发条件是「属性发生了变化」。元素刚创建就带上终态样式，浏览器不会播放动画。
+    先把 <b>起始态</b>（enter-from：如 opacity:0）加上，强制浏览器完成一次样式计算，
+    下一帧删掉它 —— 样式从 0 变 1，过渡被触发。这就是 rAF 那一帧存在的全部意义。
+  </div>
+
+  <h2>27.2 实现骨架：状态机 + 掐表</h2>
+  <pre class="code" data-title="BaseTransition 核心逻辑（源码级简化）"><code>const enterHooks = { beforeEnter, enter, leave, ... };
+
+function handleEnter(vnode, done) {
+  const el = vnode.el;
+  beforeEnter(el);                       // 加 enter-from + enter-active
+  nextFrame(() =&gt; {                      // ⭐ 下一帧
+    enterFromClass &amp;&amp; removeTransitionClass(el, enterFromClass);  // 删 from → 触发过渡
+    if (!el._isLeaving) {
+      whenTransitionEnds(el, () =&gt; {     // ⭐ 掐表：等动画真正结束
+        finishEnter(el);
+        done &amp;&amp; done();
+      });
+    }
+  });
+}
+
+function whenTransitionEnds(el, done) {
+  const { type, timeout, propCount } = getTransitionInfo(el);  // 从 computed style 读出时长
+  if (!type) return done();                                   // 没写 CSS → 直接结束
+  const onEnd = (e) =&gt; { if (e.target === el &amp;&amp; ++ended &gt;= propCount) end(); };
+  setTimeout(() =&gt; end(), timeout + 1);   // ⭐ 兜底：transitionend 不来也收场
+  el.addEventListener(type, onEnd);
+}</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 getTransitionInfo 的巧思</span><br>
+    Vue 不问你「动画多长」，而是 <code class="inline">getComputedStyle(el)</code> 读出 transition-duration/delay，
+    累加得到超时上限 —— CSS 里写多久，Vue 就等多久，<b>CSS 是唯一真相源</b>。
+    同时监听 transitionend + 超时兜底，双保险。
+  </div>
+
+  <h2>27.3 离场是真正的难点</h2>
+  <p>进入可以「直接播」，离场的麻烦在于：元素要被 v-if 删掉，但动画需要它<b>暂时留在场上</b>：</p>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox rose">v-if = false → leave 开始</span>
+        <span class="farrow">→</span>
+        <span class="fbox">元素先「缓刑」：不卸载，加 leave-active</span>
+        <span class="farrow">→</span>
+        <span class="fbox">transitionend / 超时</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">这时才真正执行 remove(el)</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">mode="out-in"</span>
+        <span class="farrow">→</span>
+        <span class="fbox">新元素等 leave 完的 done() 回调才进场</span>
+        <span class="farrow">｜</span>
+        <span class="fbox gray">mode="in-out"</span>
+        <span class="farrow">→</span>
+        <span class="fbox">反过来，先进后出</span>
+      </div>
+    </div>
+    <div class="cap">appear / v-show / KeepAlive 的 activated 也都接在同一套 enter/leave hooks 上</div>
+  </div>
+
+  <h2>27.4 🧪 Transition 时间线实验室</h2>
+  <p>
+    下面是一个<b>真实 CSS 过渡</b>（0.6s opacity + transform）。点击切换，右侧日志按真实时刻打印
+    class 的添加/移除和 transitionend —— 对照 27.1 的时刻表逐条验证。
+  </p>
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 Transition 时间线实验室<span class="hint">真实 CSS 过渡 · 真实 transitionend</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="trSteps">
+        <button class="step-btn" data-tr="toggle">▶ 切换显示 / 隐藏</button>
+        <button class="step-btn" data-tr="fast">⚡ 切 0.2s 快速档</button>
+        <button class="step-btn" data-tr="slow">🐢 切 1.2s 慢速档</button>
+        <button class="step-btn" data-tr="reset">↺ 重置</button>
+      </div>
+      <div class="demo-grid wide-left">
+        <div class="demo-col">
+          <h4>🎭 舞台（真实 CSS transition）</h4>
+          <div class="tr-stage" id="trStage">
+            <div class="tr-el" id="trEl">Hello Transition</div>
+          </div>
+          <p style="font-size:13px;color:var(--dim);margin:10px 0 0">
+            当前 class：<code class="inline" id="trCls" style="font-family:var(--mono)">（无过渡 class）</code>
+          </p>
+        </div>
+        <div class="demo-col">
+          <h4>📜 class 时间线日志</h4>
+          <div class="console" id="trConsole" style="height:230px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  
+  <h2>27.5 TransitionGroup：列表动画与 FLIP 移动</h2>
+  <p><code class="inline">&lt;TransitionGroup&gt;</code> 给「列表增删 + 顺序变化」做动画。它多出两件武器：</p>
+  <pre class="code" data-title="TransitionGroup 的特殊之处（简化）"><code>// ① 渲染真实容器（普通 Transition 不渲染任何东西）
+&lt;TransitionGroup tag="ul" name="list"&gt;
+  &lt;li v-for="item in items" :key="item.id"&gt;...&lt;/li&gt;   // ⭐ 子项必须带 key
+&lt;/TransitionGroup&gt;
+
+// ② 移动动画靠 FLIP 技巧（move class）：
+//    First：更新前记录每个子项的 getBoundingClientRect()
+//    Invert：更新后计算位移 delta，立刻用 transform 把元素"掰回"原位（无过渡）
+//    Play：下一帧清掉 transform → transform 归零的过程被 CSS transition 捕捉 → 平滑滑动</code></pre>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">更新前：记录位置 A</span>
+        <span class="farrow">→</span>
+        <span class="fbox">更新后：位置 B，立刻 transform: translate(A−B)</span>
+      </div>
+      <div class="flow">
+        <span class="fbox blue">下一帧：移除 transform（加 .list-move class）</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">CSS 过渡接管：元素从 A 滑回 B</span>
+      </div>
+    </div>
+    <div class="cap">「先瞬移再放回」—— FLIP = First, Last, Invert, Play，列表重排动画的标准解法</div>
+  </div>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么移动动画不能像 enter 一样靠 class 切换</span><br>
+    enter/leave 是「出现/消失」，有明确的起止时刻；但「位置变化」是 patch 引起的
+    <b>即时结果</b>，没有过渡可言 —— DOM 的 left/top 变了就是变了。
+    FLIP 的聪明在于：把「瞬间的位置跳变」人为拆成「先反向掰（无过渡）→ 再松手（有过渡）」，
+    硬造出一个过渡窗口。Vue 源码里的 <code class="inline">recordPosition / applyTranslation / moveClass</code>
+    三步就是这个套路。
+  </div>
+
+  <h2>27.5 TransitionGroup 与 FLIP：列表移动动画的实现</h2>
+  <pre class="code" data-title="列表排序动画的标准写法"><code>&lt;TransitionGroup tag="ul" name="list"&gt;
+  &lt;li v-for="t in todos" :key="t.id"&gt;{{ t.text }}&lt;/li&gt;
+&lt;/TransitionGroup&gt;
+
+/* name="list" 约定的 move class */
+.list-move { transition: transform .5s; }</code></pre>
+  <p>难点在「<b>移动</b>」的动画 —— DOM 的 left/top 变化没有过渡动画可用，官方用 FLIP 技术解决：</p>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">F（First）</span>
+        <span class="farrow">→</span>
+        <span class="fbox">diff 前记录每个元素的位置 getBoundingClientRect</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">L（Last）</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">patch 完成（18 章 LIS 的 move 全部执行完）后再记录新位置</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">I（Invert）</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">delta = 旧 − 新，先 transform 位移回「旧位置」（视觉上没动）</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">P（Play）</span>
+        <span class="farrow">→</span>
+        <span class="fbox">强制 reflow 后清零 transform → transition 接管 → 平滑滑到新位置</span>
+      </div>
+    </div>
+    <div class="cap">与 18 章 diff 的配合：LIS 决定「谁要移动」，FLIP 负责让这次移动有动画</div>
+  </div>
+  <div class="callout tip">
+    <span class="tag">💡 为什么用 transform 而不是 left/top？</span><br>
+    left/top 的变化触发 layout（重排），transform 走合成器（compositor）不碰布局 ——
+    动画只重绘不重排，这是 CSS 动画性能的第一军规。Vue 源码里的
+    <code class="inline">applyTranslation(s)</code> 拼的正是 <code class="inline">translate(dx, dy)</code>。
+  </div>
+
+
+  <h2>27.6 appear、v-show 与三个常见坑</h2>
+  <pre class="code" data-title="appear：首次渲染也播动画"><code>&lt;Transition appear name="fade"&gt;
+  &lt;div&gt;首屏也要淡入&lt;/div&gt;
+&lt;/Transition&gt;
+// appear → 首次挂载也走一遍 enter 流程（27.2 的 handleEnter）
+// 可细控：appear-from-class / appear-active-class / appear-to-class</code></pre>
+  <p>
+    <b>Transition + v-show：</b>合法且常用。v-show 是指令改 display（26.5），元素永不卸载；
+    Transition 在 display 切换时同样走 enter/leave hooks，动画交给 CSS。
+    所以「高频切换 + 要动画」的组合是 <b>v-show + Transition</b>，而不是 v-if（v-if 每次切换都重建 DOM）。
+  </p>
+  <table>
+    <tr><th>常见坑</th><th>现象</th><th>根因（都能回到 27.2 找到）</th></tr>
+    <tr><td>name 拼错 / CSS 类没写</td><td>切换瞬间完成，无动画也不报错</td><td>getTransitionInfo 读不到 transition → type 为空 → 直接 done（静默跳过）</td></tr>
+    <tr><td>动画样式写在子元素上</td><td>根元素瞬间切换</td><td>Transition 只作用「单根」；多根用 TransitionGroup 或显式 key 区分</td></tr>
+    <tr><td>自定义了 display 逻辑</td><td>leave 动画不播</td><td>外部强制 display 覆盖了 leave-active 的样式优先级</td></tr>
+    <tr><td>&lt;Transition&gt; 里放多个平级元素</td><td>dev 警告</td><td>同一时刻只能有一个孩子「在场」—— 多个要用 TransitionGroup</td></tr>
+  </table>
+
+<details class="quiz">
+    <summary>自测一下：Transition</summary>
+    <div class="quiz-body">
+      <p>1. 把 CSS 里 transition 时长删掉（不写），Vue 的 enter 钩子会怎样收场？<br>
+         2. mode="out-in" 下新元素为什么必须等 done()？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. getTransitionInfo 读不到 transition 属性 → type 为空 → whenTransitionEnds 直接调 done()，
+        元素瞬间完成切换（没有过渡但仍正常进出场）。这就是「动画时长只在 CSS 写一处」的原因。<br>
+        2. 同一位置新旧元素会重叠。done() 是 leave 完成的回调，BaseTransition 拿它做「旧元素真正卸载」的信号 ——
+        收到后才允许新元素进场，实现先出后进的时序编排。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="transition">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#directives"><span class="dir">上一章</span><span class="t">← 自定义指令：七个钩子</span></a>
+    <a class="next" href="builtins.html#keepalive"><span class="dir">下一章</span><span class="t">KeepAlive 深读 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+<script src="assets/labs/common.js?v=1"></script>
+<script src="assets/labs/runtime.js?v=1"></script>
+</body>
+</html>

@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 生态与工程</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<section class="page" id="page-hmr">
+  <div class="kicker">第 38 章 · 生态与工程</div>
+  <h1>HMR：热更新原理</h1>
+  <p class="lead">
+    改模板不刷新页面、改状态秒生效 —— HMR 是你使用频率最高却最少被讲原理的功能。
+    它是编译器（38.2）、运行时（38.3）与 Vite（38.4）的三方握手，本章把整条链拆开。
+  </p>
+
+  <h2>38.1 先把现象翻译成问题</h2>
+  <table>
+    <tr><th>你改的东西</th><th>你看到的行为</th><th>背后的问题</th></tr>
+    <tr><td><code class="inline">&lt;template&gt;</code></td><td>页面不刷新，视图直接变</td><td>render 函数被替换 + 组件<b>就地重渲染</b> —— 状态怎么保住的？</td></tr>
+    <tr><td><code class="inline">&lt;script setup&gt;</code></td><td>整页刷新（组件重建）</td><td>为什么这个不能热替换？setup 的响应式依赖关系变了</td></tr>
+    <tr><td><code class="inline">&lt;style&gt;</code></td><td>样式立即更新</td><td>style 模块独立成文件，只换样式不碰组件</td></tr>
+  </table>
+
+  <h2>38.2 编译侧：SFC 拆成带热边界的模块</h2>
+  <pre class="code" data-title="Vite 处理 App.vue 的真实产物（简化）"><code>// App.vue?vue&amp;type=script   ← script 模块
+import __sfc_main__ from "App.vue?vue&amp;type=script&amp;lang.ts"
+import __style__ from "App.vue?vue&amp;type=style&amp;index=0&amp;lang.css"
+import { exportDefaultComponent as __export } from "App.vue?vue&amp;type=template"
+
+__sfc_main__.render = __render            // 模板编译出的 render 挂上去
+
+// ⭐ 热边界声明：这个模块「能被谁热替换、替换时调谁」
+import.meta.hot.accept(mod =&gt; {
+  __VUE_HMR_RUNTIME__.rerender(__sfc_main__.__hmrId, mod.render)  // 模板变了
+})
+import.meta.hot.accept("App.vue?vue&amp;type=style", () =&gt; { ... })   // 样式变了</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 __hmrId 是关键线头</span><br>
+    每个 SFC 编译时都会生成唯一 id（文件路径哈希），挂到组件的
+    <code class="inline">__hmrId</code> 上。运行时的 HMR API 按 id 找组件 ——
+    「文件」与「运行中的组件实例」靠这根线连起来。
+  </div>
+
+  <h2>38.3 运行侧：__VUE_HMR_RUNTIME__ 的三个动作</h2>
+  <pre class="code" data-title="runtime-core/src/hmr.ts（核心，教学化简）"><code>export function hmrRerender(id, newRender) {
+  // 模板热替换：找到该 id 的所有运行中实例
+  const registered = hmrIdToInstancesMap.get(id);
+  for (const instance of registered) {
+    instance.render = newRender;          // ⭐ 换渲染函数
+    instance.update();                    // 立即重渲染（走 23 章队列）
+  }
+}
+
+export function hmrReload(id, newComponent) {
+  // script 热替换：实例的 type 整个换新 —— 响应式依赖关系可能全变
+  const registered = hmrIdToInstancesMap.get(id);
+  for (const instance of registered) {
+    newComponent.__hmrId = id;
+    instance.type = newComponent;         // ⭐ 就地换心
+    // 保留 instance/props/el，但 setup 需要重跑 → 官方选择「整棵子树重挂」保正确性
+    // rerender 约束不满足时 → reload = 卸载重挂
+  }
+}
+// 另有 createRecord / getRecord 等登记表辅助：hmrId → 组件集合</code></pre>
+
+  <h2>38.4 Vite 的角色：WebSocket 快递员</h2>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox">保存文件</span>
+      <span class="farrow">→</span>
+      <span class="fbox gray">Vite 编译变更模块</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">WebSocket 推送 { file, timestamp }</span>
+      <span class="farrow">→</span>
+      <span class="fbox">浏览器端 import() 拉新模块</span>
+      <span class="farrow">→</span>
+      <span class="fbox rose">执行 hot.accept 回调 → rerender/reload</span>
+    </div>
+    <div class="cap">Vite 只负责「把新模块送到浏览器」，组件怎么换是 Vue 运行时的事 —— 职责边界干净</div>
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：HMR</summary>
+    <div class="quiz-body">
+      <p>1. 为什么改 template 能保住组件状态，改 script 不行？<br>
+         2. HMR 和 SSR 有什么相似的架构思想？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. template 变化 = render 函数变化，组件实例和它的响应式状态不动，rerender 重跑 render 即可；
+        script 变化意味着 setup 逻辑/依赖声明可能全变，旧实例的响应式连接不可信 —— 只能整树重挂（reload）。<br>
+        2. 都是「同一套运行时，两套驱动」：SSR 是字符串驱动 vs DOM 驱动（第 36 章），
+        HMR 是新模块驱动旧实例。框架核心保持中立，边界协议可插拔 —— 大型框架的通用生存策略。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="hmr">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="frontier.html#custom"><span class="dir">上一章</span><span class="t">← 自定义渲染器实战</span></a>
+    <a class="next" href="#devtools"><span class="dir">下一章</span><span class="t">vue-devtools 协议 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 39 devtools ============ -->
+<section class="page" id="page-devtools">
+  <div class="kicker">第 39 章 · 生态与工程</div>
+  <h1>vue-devtools 协议</h1>
+  <p class="lead">
+    你调试时看到的组件树、响应式状态、时间旅行 —— 都不是 Vue 内置的，
+    而是运行时通过一个<b>全局钩子</b>把内部数据「广播」出去。读完本章，你可以自己写一个调试插件。
+  </p>
+
+  <h2>39.1 钩子：一条全局广播通道</h2>
+  <pre class="code" data-title="runtime-core/src/devtools.ts（骨架）"><code>// window.__VUE_DEVTOOLS_GLOBAL_HOOK__ 由 devtools 扩展预先注入
+// Vue 运行时启动时「认领」它：
+export function setDevtoolsHook(hook, target) {
+  devtools = hook;
+  if (hook) {
+    // Vue 侧声明自己支持的能力
+    hook.emit("init", {
+      Vue, app instances map, version,
+      highlightElement / unhighlightElement,   // 给 devtools 的高亮回调
+    });
+  }
+}
+// 组件挂载/更新/卸载时（dev 模式）：
+if (__DEV__ &amp;&amp; devtools) {
+  devtools.emit("component:mounted", vnode.component);   // 广播事件
+  devtools.emit("component:updated", instance);
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么用事件广播而不是直接暴露？</span><br>
+    解耦：devtools 扩展可能比页面晚加载（刷新扩展不刷页面），双向事件让「晚到的一方」也能
+    通过 flush 事件补齐全部已存在的实例。协议即契约 —— 双方各自实现契约，互不 import。
+  </div>
+
+  <h2>39.2 组件树怎么被「读走」</h2>
+  <table>
+    <tr><th>devtools 面板</th><th>数据来源（instance 的哪个字段）</th></tr>
+    <tr><td>组件树</td><td>subTree 递归 + parent 链（第 19/22 章的实例树）</td></tr>
+    <tr><td>State / Setup 面板</td><td>instance.setupState（proxyRefs 代理）、props、data</td></tr>
+    <tr><td>「编辑状态」生效</td><td>直接改 proxy 的属性 → 触发响应式更新（第 3/5 章）</td></tr>
+    <tr><td>渲染高亮</td><td>Vue 注册的 highlightElement 回调：给 el 加 outline，rAF 后移除</td></tr>
+    <tr><td>时间旅行（Pinia 面板）</td><td>store.$subscribe 快照队列（41 章）+ 状态快照回放</td></tr>
+  </table>
+
+  <h2>39.3 自己写一个 30 行调试插件</h2>
+  <pre class="code" data-title="迷你版组件渲染监控"><code>const hook = (window).__VUE_DEVTOOLS_GLOBAL_HOOK__;
+const renderCounts = new Map();
+
+app.mixin({
+  mounted() {
+    const name = this.$.type.name || this.$.type.__name || "Anonymous";
+    renderCounts.set(name, (renderCounts.get(name) || 0) + 1);
+  },
+  updated() {
+    const name = this.$.type.__name || "Anonymous";
+    renderCounts.set(name, (renderCounts.get(name) || 0) + 1);
+  },
+});
+
+setInterval(() =&gt; {
+  console.table([...renderCounts].sort((a, b) =&gt; b[1] - a[1]).slice(0, 5));
+}, 5000);
+// ⭐ 这就是 33.4「为什么这个组件渲染了」的土法实现 —— 原理与 devtools 完全同源</code></pre>
+
+  <details class="quiz">
+    <summary>自测一下：devtools 协议</summary>
+    <div class="quiz-body">
+      <p>1. 为什么生产构建里这些广播代码消失了？<br>
+         2. devtools 面板里「编辑状态」为什么能直接生效？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 广播代码全部包在 <code class="inline">if (__DEV__)</code> 里，生产构建被 tree-shake ——
+        零运行时成本，这也是 devtools 只能连 dev 服务器的原因。<br>
+        2. 它改的是 proxy 上的属性，走的就是你手写的响应式系统：set 拦截 → trigger → 重渲染（第 3/5/23 章）。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="devtools">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#hmr"><span class="dir">上一章</span><span class="t">← HMR：热更新原理</span></a>
+    <a class="next" href="#router"><span class="dir">下一章</span><span class="t">Vue Router 源码导览 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 40 router ============ -->
+<section class="page" id="page-router">
+  <div class="kicker">第 40 章 · 生态与工程</div>
+  <h1>Vue Router 源码导览</h1>
+  <p class="lead">
+    你已经能猜到 Router 的一半：<b>currentRoute 是个 reactive 对象</b>，改它组件就重渲染。
+    本章补另一半：history 监听怎么接、matcher 怎么把路径变成组件、导航守卫的队列怎么跑。
+  </p>
+
+  <h2>40.1 createRouter：一个 reactive + 一次 install</h2>
+  <pre class="code" data-title="router.mjs 的骨架（源码级简化）"><code>export function createRouter(options) {
+  const currentRoute = shallowRef(START_LOCATION);   // ⭐ 当前路径（浅响应）
+  const matcher = createRouterMatcher(options.routes); // 路径 → 组件 的匹配器
+
+  function push(to) {
+    return pushWithRedirect(to);   // 内部：跑守卫队列 → 改 history → 更新 currentRoute
+  }
+
+  const router = {
+    push, replace, back,
+    install(app) {                 // ⭐ app.use(router) 时执行（第 18.5 节的套路）
+      app.component("RouterView", RouterView);
+      app.component("RouterLink", RouterLink);
+      app.provide(routerKey, router);            // provide 三件套（第 24.1 节原型链顶端）
+      app.provide(routeLocationKey, reactive(currentRoute));
+      app.provide(routerViewLocationKey, currentRoute);
+    },
+  };
+  return router;
+}</code></pre>
+
+  <h2>40.2 history 层：把浏览器 API 包成统一接口</h2>
+  <pre class="code" data-title="createWebHistory（简化）"><code>export function createWebHistory(base) {
+  function changeLocation(to, state, replace) {
+    const url = base + to;
+    history[replace ? "replaceState" : "pushState"](state, "", url);  // 不触发 popstate！
+    // ⭐ 所以 push 后要手动同步：listeners.forEach(fn =&gt; fn({ location: currentLocation }))
+  }
+  window.addEventListener("popstate", () =&gt; {
+    listeners.forEach(fn =&gt; fn({ location: currentLocation }));      // 前进后退走这里
+  });
+  return { location, listen(cb) {...}, push: to =&gt; changeLocation(to, null, false), ... };
+}
+// createWebHashHistory / createMemoryHistory 同接口不同实现 —— 又见「换发动机」架构（36 章）</code></pre>
+
+  <h2>40.3 matcher 深讲：路径怎么变成「能拿组件的记录」</h2>
+  <pre class="code" data-title="createRouterMatcher 的三步"><code>// ① 注册：每条 route 编译成「正则 + 参数名清单 + 记分卡」
+function addRoute(record, parent) {
+  const normalized = { path: normalizePath(record.path), components: record.components, ... };
+  const matcher = createRouteRecordMatcher(normalized, parent);
+  // path-to-regexp：/user/:id → /^\/user\/([^/]+)?$/i + 参数名 ["id"]
+  insertMatcher(matcher);        // ⭐ 按「特异性」排序插入
+}
+// ② 排序：/user/new 必须排在 /user/:id 前面
+//    记分规则：静态段 &gt; 动态段 &gt; 可选段 &gt; 重复参数 —— 分高者先匹配
+// ③ 匹配：resolve(location) 从头找第一个 test(path) 通过的 matcher
+//    → 返回 { matched: [record 链] }（嵌套路由的父子链按深度排好）</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 matched 数组是 RouterView 的燃料</span><br>
+    <code class="inline">/user/1/posts/2</code> 命中两层嵌套路由时，matched = [User 记录, Posts 记录]。
+    RouterView 渲染时看「自己在 matched 里的深度」：第一层 View 取 matched[0]，
+    里面的 View 取 matched[1] —— 嵌套渲染就是同一组件查表取不同深度。
+  </div>
+
+  <h2>40.4 导航守卫队列：一次 push 的完整流水线</h2>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox">beforeRouteLeave（当前组件）</span>
+      <span class="farrow">→</span>
+      <span class="fbox">beforeEach（全局）</span>
+      <span class="farrow">→</span>
+      <span class="fbox">beforeEnter（目标路由）</span>
+      <span class="farrow">→</span>
+      <span class="fbox">beforeRouteEnter（目标组件）</span>
+    </div>
+    <div class="flow" style="margin-top:10px">
+      <span class="fbox rose">全部放行</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">更新 history + currentRoute</span>
+      <span class="farrow">→</span>
+      <span class="fbox">afterEach / beforeResolve</span>
+    </div>
+    <div class="cap">任何一环 return false / next(false) → 队列中断、URL 回滚 —— 队列的本质是「可中断的 Promise 链」</div>
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：Vue Router</summary>
+    <div class="quiz-body">
+      <p>1. RouterView 重渲染的响应式链路是什么？<br>
+         2. 为什么 /user/new 要写在 /user/:id 前面，官方才能保证正确？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. currentRoute 是 reactive（40.1）→ RouterView 的 render 读它（同时读 matched 深度）
+        → 路径变化触发组件重渲染 → 查 matched[深度] 换组件 → 走 18 章 patch。<br>
+        2. matcher 按特异性排序注册，静态段分数高于动态段 —— 即使写错顺序，官方也会按分数
+        插到正确位置；「写在前面的优先」是给人的直觉，机器真正依赖的是 rank。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="router">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#devtools"><span class="dir">上一章</span><span class="t">← vue-devtools 协议</span></a>
+    <a class="next" href="#pinia"><span class="dir">下一章</span><span class="t">Pinia 源码导览 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 41 pinia ============ -->
+<section class="page" id="page-pinia">
+  <div class="kicker">第 41 章 · 生态与工程</div>
+  <h1>Pinia 源码导览</h1>
+  <p class="lead">
+    第 24.8 节剧透过它的本质。本章展开：install 流程、store 的惰性创建、
+    $patch / $subscribe 的实现，以及「为什么 pinia 没有 mutation」。
+  </p>
+
+  <h2>41.1 createPinia：install 做的四件事</h2>
+  <pre class="code" data-title="createPinia 的 install（源码级简化）"><code>export function createPinia() {
+  const scope = effectScope(true);        // ⭐ 独立的根作用域（第 10 章）
+  const state = {};                       // 所有 store 的 state 都存这里：id → state
+  const pinia = {
+    install(app) {
+      setActivePinia(pinia);
+      scope.run(() =&gt; {                   // 后续所有 store 都建在这个 scope 下
+        app.provide(piniaKey, pinia);     // 全树可 inject（第 24.1 节）
+      });
+      app.config.globalProperties.$pinia = pinia;
+    },
+    _s: new Map(),                        // id → store 实例（useStore 的注册表）
+    _e: scope, _p: plugins, state,
+  };
+  return pinia;
+}</code></pre>
+
+  <h2>41.2 defineStore：返回的是一个「惰性 useStore」</h2>
+  <pre class="code" data-title="defineStore / useStore（核心）"><code>export function defineStore(id, setup) {
+  function useStore(pinia = activePinia) {
+    pinia = pinia || getCurrentInstance()?.appContext.config.globalProperties.$pinia;
+    if (!pinia._s.has(id)) {              // ⭐ 首次调用才创建 —— 惰性单例
+      createSetupStore(id, setup, options, pinia);
+    }
+    return pinia._s.get(id);
+  }
+  useStore.$id = id;
+  return useStore;
+}
+
+function createSetupStore(id, setup, pinia) {
+  let store;                              // 循环引用的解法：先声明，setup 里可用
+  const partialStore = { $id, _p: pinia, $patch, $reset, $subscribe, $onAction, ... };
+  store = reactive(Object.assign(partialStore, setup()));  // ⭐ 状态+actions+getters 一锅 reactive
+  pinia._s.set(id, store);
+  return store;
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么没有 mutation？</span><br>
+    setup store 里 state 就是普通 ref、修改就是普通赋值 —— 响应式系统（第 3 章）天然支持细粒度追踪，
+   Vuex 时代的 mutation 是为了给 devtools 一个「统一钩子」记录每次变更；
+    pinia 改用 $subscribe 直接订阅 store 的变化（底层是 watch），不需要中间层。
+    <b>架构演进的方向：当底层能力足够强，中间的仪式层就该消失。</b>
+  </div>
+
+  <h2>41.3 $patch 与 $subscribe</h2>
+  <pre class="code" data-title="批量修改与订阅（源码级简化）"><code>function $patch(partialStateOrMutator) {
+  // 对象形式：mergeReactiveObjects(store, partial) —— 深合并进 reactive
+  // 函数形式：mutator(store) —— 给你 store 随便改
+  // ⭐ 一次 $patch 只触发一次订阅（内部包了一层暂停/恢复 watch 的机制）
+}
+
+function $subscribe(callback, opts) {
+  scopeEffect = effectScope();                      // 挂在 store 自己的 scope 下
+  const stop = watch(pinia.state.value[id], (state) =&gt; {
+    callback({ storeId: id }, state);               // ⭐ 盯的是 state 源头
+  }, { deep: true, ...opts });
+  return stop;                                      // 停止订阅 = 停止这个 watch（第 9 章）
+}</code></pre>
+
+  <h2>41.4 和 Vue 内核的对应关系总表</h2>
+  <table>
+    <tr><th>Pinia 概念</th><th>内核机制（本站出处）</th></tr>
+    <tr><td>store 本体</td><td>reactive + proxyRefs（第 3 / 7 章）</td></tr>
+    <tr><td>getters</td><td>computed（第 8 章）</td></tr>
+    <tr><td>$subscribe</td><td>watch + flush:'sync' 可选（第 9 / 23 章）</td></tr>
+    <tr><td>store 生命周期</td><td>effectScope 树（第 10 章），组件内 useStore 时挂到组件 scope</td></tr>
+    <tr><td>跨组件共享</td><td>app.provide（第 24.1 节）</td></tr>
+    <tr><td>devtools 时间旅行</td><td>$subscribe 快照 + 39 章的钩子广播</td></tr>
+  </table>
+
+  <details class="quiz">
+    <summary>自测一下：Pinia</summary>
+    <div class="quiz-body">
+      <p>1. 两个组件先后 useStore 同一个 id，拿到的是几个 store？靠什么实现？<br>
+         2. 在组件 setup 里 useStore 创建的 store，组件卸载会被销毁吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 一个。pinia._s 是以 id 为键的注册表，首次创建、后续复用 —— 惰性单例。<br>
+        2. 不会。store 的 effectScope 挂在 pinia 的根 scope 下（app 级），不随组件卸载；
+        组件 scope 只持有「引用」。这正是全局状态的语义。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="pinia">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#router"><span class="dir">上一章</span><span class="t">← Vue Router 源码导览</span></a>
+    <a class="next" href="#vueuse"><span class="dir">下一章</span><span class="t">VueUse 精选实现 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 42 vueuse ============ -->
+<section class="page" id="page-vueuse">
+  <div class="kicker">第 42 章 · 生态与工程</div>
+  <h1>VueUse 精选实现</h1>
+  <p class="lead">
+    VueUse 的两百个函数没有一个用到你没学过的机制 —— 它们全是第 2~29 章组合式函数范式（10.7）的复写。
+    本章亲手实现五个最高频的，写完你就有了「任何 VueUse 函数都能读」的信心。
+  </p>
+
+  <h2>42.1 useEventListener：清理的标准姿势</h2>
+  <pre class="code" data-title="官方实现（简化到只剩灵魂）"><code>export function useEventListener(...args) {
+  let cleanup = () =&gt; {};
+  const register = (el, event, listener) =&gt; {
+    el.addEventListener(event, listener);
+    return () =&gt; el.removeEventListener(event, listener);
+  };
+  const stopWatch = watch(
+    () =&gt; unrefEl(args),               // 目标元素可以是 ref/getter —— 10.7 的输入兼容
+    (el) =&gt; {
+      cleanup();                       // 元素变了 → 先拆旧的
+      if (el) cleanup = register(el, event, listener);
+    },
+    { immediate: true, flush: "post" } // post：DOM 就位后再挂（第 23 章的时序）
+  );
+  const stop = () =&gt; { stopWatch(); cleanup(); };
+  onScopeDispose(stop);                // ⭐ 随作用域自动清理（10.6）
+  return stop;
+}</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 这个函数教会你的三件事</span><br>
+    watch 负责响应式（目标可变）、cleanup 负责幂等（重复注册先拆旧）、onScopeDispose 负责生命周期 ——
+    三件套几乎构成所有 DOM 类组合式函数的模板。
+  </div>
+
+  <h2>42.2 useDebounceFn / useThrottleFn：纯函数包装</h2>
+  <pre class="code" data-title="防抖（core）"><code>export function useDebounceFn(fn, ms = 200) {
+  let timer = null;
+  const debounced = (...args) =&gt; {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() =&gt; fn(...args), ms);
+  };
+  tryOnScopeDispose(() =&gt; timer &amp;&amp; clearTimeout(timer));   // 作用域销毁 → 取消尾巴
+  return debounced;
+}
+// 全程没有任何响应式 —— useXxx 不一定要碰 ref；「管理资源生命周期」本身就是价值</code></pre>
+
+  <h2>42.3 useLocalStorage：ref + 序列化 + 跨标签页</h2>
+  <pre class="code" data-title="核心三件套"><code>export function useLocalStorage(key, initial) {
+  const data = ref(read());                        // ① 初始值从 localStorage 读
+  function read() {
+    try { const raw = window.localStorage.getItem(key);
+          return raw ? JSON.parse(raw) : initial; } catch { return initial; }
+  }
+  watch(data, (v) =&gt; window.localStorage.setItem(key, JSON.stringify(v)),
+        { deep: true });                           // ② 变了就写回
+  window.addEventListener("storage", (e) =&gt; {      // ③ 其他标签页改了 → 同步（42.1 思想）
+    if (e.key === key) data.value = read();
+  });
+  return data;
+}</code></pre>
+
+  <h2>42.4 useIntersectionObserver / useMediaQuery：原生 API 的响应式马甲</h2>
+  <pre class="code" data-title="useMediaQuery（最短的一个，五行的哲学）"><code>export function useMediaQuery(query) {
+  const matches = ref(false);
+  const update = () =&gt; { matches.value = window.matchMedia(query).matches; };
+  useEventListener(window, "resize", update, { passive: true });   // 复用 42.1
+  update();                                                        // 立即初始化
+  return computed(() =&gt; matches.value);
+}
+// 把「命令式 API」翻译成「响应式状态」—— 这是 VueUse 一半函数的套路</code></pre>
+
+  <details class="quiz">
+    <summary>自测一下：VueUse 实现</summary>
+    <div class="quiz-body">
+      <p>1. 为什么 useEventListener 要 watch 元素而不是只 addEventListener 一次？<br>
+         2. useDebounceFn 里没有任何 ref，为什么也要 tryOnScopeDispose？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 目标元素可能随 v-if / 动态 ref 变化 —— watch 元素变化时先拆旧监听再挂新监听，保证永不泄漏、永不双挂。<br>
+        2. 组件销毁后 pending 的 setTimeout 仍会执行回调，访问已卸载组件的闭包轻则警告重则报错 ——
+        生命周期清理与「是否响应式」无关。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="vueuse">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#pinia"><span class="dir">上一章</span><span class="t">← Pinia 源码导览</span></a>
+    <a class="next" href="#testing"><span class="dir">下一章</span><span class="t">用测试读源码 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 43 testing ============ -->
+<section class="page" id="page-testing">
+  <div class="kicker">第 43 章 · 生态与工程</div>
+  <h1>用测试读源码</h1>
+  <p class="lead">
+    读源码最稳的入口不是实现文件，而是 <code class="inline">__tests__</code> 目录 ——
+    测试断言就是「行为说明书」。本章教你用这套方法反哺自己的 mini-vue3：先写测试，再补实现。
+  </p>
+
+  <h2>43.1 官方测试的读法</h2>
+  <pre class="code" data-title="packages/reactivity/__tests__/effect.spec.ts（真实风格）"><code>describe("reactive/effect", () =&gt; {
+  it("should run the passed function once immediately", () =&gt; {
+    const spy = vi.fn();                       // ⭐ 用 spy 断言「执行了几次」
+    effect(spy);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("should observe multiple properties", () =&gt; {
+    let dummy;
+    const counter = reactive({ num1: 0, num2: 0 });
+    effect(() =&gt; (dummy = counter.num1 + counter.num2));
+    counter.num1 = 1;
+    expect(dummy).toBe(1);
+    counter.num2 = 2;
+    expect(dummy).toBe(3);                     // ⭐ 断言「联动」而不是实现
+  });
+
+  it("should not be triggered on setting the same value", () =&gt; {
+    // ⭐ 这条正是 5.2 的 Object.is 陷阱 —— 官方测试先行，实现跟上
+  });
+});</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 「断言行为，不断言实现」</span><br>
+    官方测试从不检查内部变量 _trackId / dep 结构，只断言外部可观察行为：调用几次、值是多少、DOM 变没变。
+    所以 Vue 才能在 3.4 敢把整个依赖系统从 Map 换成链表、3.6 又敢换成 alien-signals —— 测试照绿。
+    <b>好的测试是重构的通行证。</b>
+  </div>
+
+  <h2>43.2 给 mini-vue3 写测试：三组起步用例</h2>
+  <pre class="code" data-title="test/reactivity.spec.ts（照抄即用）"><code>import { describe, it, expect, vi } from "vitest";
+import { reactive, ref, effect } from "../src";
+
+describe("mini-reactivity", () =&gt; {
+  it("track → trigger → rerun", () =&gt; {
+    const state = reactive({ n: 0 });
+    let dummy;
+    effect(() =&gt; (dummy = state.n));
+    state.n = 1;
+    expect(dummy).toBe(1);
+  });
+
+  it("分支切换后清理旧依赖（第 6 章）", () =&gt; {
+    const state = reactive({ flag: true, name: "a", age: 1 });
+    let dummy, runs = 0;
+    const spy = vi.fn(() =&gt; { runs++; dummy = state.flag ? state.name : state.age; });
+    effect(spy);
+    state.flag = false;                     // 分支切换
+    const runsAfterSwitch = runs;
+    state.name = "b";                       // 改已无人的 name
+    expect(runs).toBe(runsAfterSwitch);     // ⭐ 不应再触发 —— 清理生效
+  });
+
+  it("ref setter 应保持对象的响应式（第 7 章找茬）", () =&gt; {
+    const r = ref({ name: "a" });
+    r.value = { name: "b" };
+    expect(isReactive(r.value)).toBe(true); // ⭐ 你给官方提 PR 时就是这条
+  });
+});</code></pre>
+
+  <h2>43.3 @vue/runtime-test：官方自己的「假 DOM」</h2>
+  <p>
+    官方测渲染器时不操作真 DOM，而是用 <code class="inline">@vue/runtime-test</code> ——
+    一个输出「可断言轻量树」的自定义渲染器（第 37 章的活教材）。
+    断言形如 <code class="inline">expect(root.innerHTML).toBe(...)</code> 或直接检查节点树结构。
+    <b>给渲染器写测试 = 给渲染器换一个可检查的宿主</b>，这与你已经掌握的 nodeOps 注入完全一致。
+  </p>
+  <div class="callout tip">
+    <span class="tag">💡 实战节奏建议</span><br>
+    第 44~48 章每章末尾都给了验收测试 —— 正确姿势是<b>先写测试、看它红、再抄实现、看它绿</b>。
+    红绿循环把「抄代码」变成「验证理解」。
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：用测试读源码</summary>
+    <div class="quiz-body">
+      <p>1. 为什么官方换掉整个依赖系统的内部结构，测试一行不用改？<br>
+         2. 用 runtime-test 测渲染器和 37 章的 canvas 渲染器，本质相同吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 测试只断言公开行为（effect 触发次数、computed 缓存语义）—— 内部从 Map 换链表属于纯重构，
+        行为不变则测试不变。<br>
+        2. 相同。都是「nodeOps 换宿主」：一个换到可断言的内存树，一个换到 canvas ——
+        测试友好性和显示能力，都是注入协议的产物。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="testing">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#vueuse"><span class="dir">上一章</span><span class="t">← VueUse 精选实现</span></a>
+    <a class="next" href="build.html#build1"><span class="dir">下一章</span><span class="t">写完① 渲染器主体 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+</body>
+</html>

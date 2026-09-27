@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 边界与生态</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 35 error ============ -->
+<section class="page" id="page-error">
+  <div class="kicker">第 35 章 · 边界与生态</div>
+  <h1>错误处理：捕获与传播</h1>
+  <p class="lead">
+    渲染函数抛错、watch 回调抛错、生命周期钩子抛错 —— 如果没有一套体系，
+    任何一处用户代码的异常都会炸掉整个组件树更新。Vue 的答案是两层结构：
+    <b>调用时包装（接住错误）+ 实例链上溯（处理错误）</b>。
+    官方源码：<code class="inline">runtime-core/src/errorHandling.ts</code>。
+  </p>
+
+  <h2>35.1 第一层：callWithErrorHandling 包装一切</h2>
+  <pre class="code" data-title="errorHandling.ts 核心（原文级别）"><code>export function callWithErrorHandling(fn, instance, type, args) {
+  let res;
+  try {
+    res = args ? fn(...args) : fn();     // 用户代码（render / 钩子 / 回调）
+  } catch (err) {
+    handleError(err, instance, type);    // ⭐ 统一入口
+  }
+  return res;
+}
+
+// 异步版本：返回 promise 上挂 catch
+export function callWithAsyncErrorHandling(fn, instance, type, args) {
+  const res = callWithErrorHandling(fn, instance, type, args);
+  if (res &amp;&amp; isPromise(res)) {
+    res.catch((err) =&gt; handleError(err, instance, type));
+  }
+  return res;
+}
+
+// 框架内所有「调用户代码」的地方都走这两个包装：
+// render()、setup()、生命周期钩子、watch 回调、指令钩子、事件监听器……</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 设计思想：接错点在调用处</span><br>
+    Vue 不去碰你的 try/catch，也不做全局 unhandledrejection 依赖 ——
+    而是<b>框架调用用户代码的每一个地方都包一层</b>。这依赖一个纪律：
+    所有用户代码必须经由框架调用（这正是响应式 + 虚拟 DOM 的副产品：渲染和回调的入口高度收敛）。
+  </div>
+
+  <h2>35.2 第二层：handleError 沿父链上溯</h2>
+  <pre class="code" data-title="handleError：找第一个愿意接的人"><code>function handleError(err, instance, type, throwInDev = true) {
+  const contextVNode = instance ? instance.vnode : null;
+  if (instance) {
+    let cur = instance.parent;                       // ⭐ 从父组件开始沿链上溯
+    while (cur) {
+      const errorCapturedHooks = cur.ec;             // onErrorCaptured 注册的钩子
+      if (errorCapturedHooks) {
+        for (let i = 0; i &lt; errorCapturedHooks.length; i++) {
+          if (errorCapturedHooks[i](err, instance, type) === false) return;  // ⭐ 返回 false = 终止传播
+        }
+      }
+      cur = cur.parent;
+    }
+    // 组件自己的 app.config.errorHandler（全局兜底）
+    const appErrorHandler = instance.appContext.config.errorHandler;
+    if (appErrorHandler) {
+      callWithErrorHandling(appErrorHandler, null, ErrorCodes.APP_ERROR_HANDLER,
+        [err, instance, type]);
+      return;
+    }
+  }
+  logError(err, type, contextVNode, throwInDev);     // 没人接 → 控制台警告
+}</code></pre>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox rose">子组件 render 抛错</span>
+      <span class="farrow">→</span>
+      <span class="fbox">父 onErrorCaptured</span>
+      <span class="farrow">→</span>
+      <span class="fbox">祖父 onErrorCaptured</span>
+      <span class="farrow">→</span>
+      <span class="fbox blue">app.config.errorHandler</span>
+      <span class="farrow">→</span>
+      <span class="fbox gray">控制台警告（兜底）</span>
+    </div>
+    <div class="cap">任何一层钩子返回 false → 传播立刻终止（适合错误上报后吞掉）</div>
+  </div>
+  <table>
+    <tr><th>ErrorCodes 大类</th><th>什么时候抛</th></tr>
+    <tr><td><code class="inline">SETUP_FUNCTION / RENDER_FUNCTION</code></td><td>setup / render 执行</td></tr>
+    <tr><td><code class="inline">WATCH_CALLBACK / WATCH_CLEANUP</code></td><td>watch 回调 / onCleanup</td></tr>
+    <tr><td><code class="inline">NATIVE_EVENT_HANDLER / COMPONENT_EVENT_HANDLER</code></td><td>原生事件 / 自定义事件 emit</td></tr>
+    <tr><td><code class="inline">DIRECTIVE_HOOKED / APP_UNMOUNT_FN</code></td><td>指令钩子（第 26 章）/ unmount</td></tr>
+    <tr><td><code class="inline">SCHEDULER</code></td><td>flushJobs 里 job 执行（第 23 章的 try/finally！）</td></tr>
+  </table>
+
+  <h2>35.3 🧪 错误传播实验室</h2>
+  <p>
+    下面搭了一条 父 → 子 → 孙 的组件链（模拟实现，逻辑与 handleError 同构）。
+    点击让孙组件抛错，然后逐层打开捕获开关，观察传播如何被截断：
+  </p>
+  <div class="demo">
+    <div class="demo-head"><span class="dot"></span>🧪 错误传播实验室<span class="hint">onErrorCaptured 链 · errorHandler 兜底</span></div>
+    <div class="demo-body">
+      <div class="step-btns" id="erSteps">
+        <button class="step-btn" data-er="throw">💥 孙组件抛错</button>
+        <button class="step-btn" data-er="p">父组件 onErrorCaptured：开 / 关</button>
+        <button class="step-btn" data-er="g">祖父 onErrorCaptured：开 / 关</button>
+        <button class="step-btn" data-er="h">全局 errorHandler：开 / 关</button>
+        <button class="step-btn" data-er="reset">↺ 重置</button>
+      </div>
+      <div class="demo-grid wide-left">
+        <div class="demo-col">
+          <h4>📜 传播日志</h4>
+          <div class="console" id="erConsole" style="height:260px"></div>
+        </div>
+        <div class="demo-col">
+          <h4>🧩 捕获层开关状态</h4>
+          <div class="stat-grid" style="margin-top:0">
+            <div class="stat" id="erP"><div class="v">关</div><div class="k">父 onErrorCaptured</div></div>
+            <div class="stat" id="erG"><div class="v">关</div><div class="k">祖父 onErrorCaptured</div></div>
+            <div class="stat" id="erH"><div class="v">关</div><div class="k">app errorHandler</div></div>
+          </div>
+          <p style="font-size:14px;color:var(--dim);margin-bottom:0">
+            实验：全关 → 三层兜底逐个出现；只开「父」且返回 false → 传播当场终止，日志只剩一行。
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  
+  <h2>35.4 生产分工：errorHandler 接全局，异步错误要另请高明</h2>
+  <p>两件实战里最常被问到的边界事：</p>
+  <p><b>① errorHandler 与 onErrorCaptured 的分工</b>：</p>
+  <table>
+    <tr><th>角色</th><th>管什么</th><th>典型代码</th></tr>
+    <tr><td><code class="inline">app.config.errorHandler</code></td><td>全局兜底：统一上报（Sentry / 自建埋点）、屏蔽白屏</td><td>应用入口配置一次</td></tr>
+    <tr><td><code class="inline">onErrorCaptured</code></td><td>局部降级：某棵子树出错时显示占位 UI、阻止错误惊动全局</td><td>布局组件 / 边界组件里</td></tr>
+  </table>
+  <p><b>② 框架接不住的错误</b>：第 35.1 节说过「框架只包它自己发起的调用」。这三类错误框架看不见：</p>
+  <pre class="code" data-title="逃逸清单 + 兜底"><code>setTimeout(() =&gt; { throw new Error('x') }, 0);   // 宏任务回调 → 框架不在调用链上
+fetch(...).then(() =&gt; { throw ... });             // 未接住 rejection → unhandledrejection
+new Promise(() =&gt; { throw ... });                 // 同上
+
+// 通用兜底（不属于 Vue，属于浏览器）：
+window.addEventListener('error', e =&gt; report(e));
+window.addEventListener('unhandledrejection', e =&gt; report(e.reason));
+// ⭐ 完整的前端监控 = Vue errorHandler + 浏览器兜底，缺一不可</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 记住这条边界</span><br>
+    判断一个错误「Vue 能不能接住」只需问一句：<b>这次调用是不是 Vue 发起的？</b>
+    render、生命周期、watch 回调、事件 invoker（第 35.1 节）—— 是，接得住；
+    setTimeout、原生事件、自己 new 的 Promise 链 —— 不是，接不住。
+    这条边界同样是第 26 章指令钩子、第 23 章调度器 shared 的心智模型：<b>框架的世界止于它发起的调用</b>。
+  </div>
+
+  <h2>35.4 生产环境的错误上报体系</h2>
+  <pre class="code" data-title="errorHandler 的标准姿势（可直接抄）"><code>app.config.errorHandler = (err, instance, info) =&gt; {
+  // ① 错误指纹去重：同一错误刷屏会淹死日志系统
+  const fingerprint = `${err.message}::${instance?.uid ?? 'root'}::${info}`;
+  if (reported.has(fingerprint)) return;
+  reported.add(fingerprint);
+
+  // ② 按来源分级（info 就是 35.1 的 ErrorCodes）
+  const level = info.includes('render') ? 'fatal'     // 渲染炸 = 页面白屏级
+              : info.includes('watch') ? 'warn'        // watch 炸 = 功能局部受损
+              : 'info';
+  report({ level, fingerprint, stack: err.stack, info });
+
+  // ③ 上报本身绝不能再抛错 —— 包一层 try/catch
+  // ④ 开发期保留 console 打印，方便本地复现
+};</code></pre>
+  <table>
+    <tr><th>框架管不到的漏网之鱼</th><th>兜底方案</th></tr>
+    <tr><td>裸 Promise 的 reject（没走 callWithAsyncErrorHandling 的）</td><td><code class="inline">window.addEventListener('unhandledrejection', ...)</code></td></tr>
+    <tr><td>setTimeout / 原生事件监听器里的错误</td><td><code class="inline">window.addEventListener('error', ...)</code></td></tr>
+    <tr><td>资源加载失败</td><td>error 事件 + <code class="inline">capture: true</code></td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 双保险架构</span><br>
+    框架的 errorHandler 管「经过 Vue 的调用」（信息最全：有 instance、info），
+    window 级监听管「框架外的世界」（信息少但无死角）。
+    两路都接到同一个上报管道，指纹去重避免重复 —— 生产监控的标准三层。
+  </div>
+
+
+  <h2>35.5 warn 与 error：两套告警体系</h2>
+  <pre class="code" data-title="warn 的实现（一个 if 就懂）"><code>export function warn(msg, ...args) {
+  if (__DEV__) {   // ⭐ 生产构建里整棵函数被 tree-shake 成空
+    console.warn(`[Vue warn]: ${formatMessage(msg, ...args)}`);
+  }
+}
+// warn 不抛错、不进 handleError 链 —— 它是「提示」，不是「异常」
+// error 才走 35.2 的 handleError 父链上溯</code></pre>
+  <p>顺手把官方 warn 里最高频的几条收进来 —— 见到它们就知道病根在哪：</p>
+  <table>
+    <tr><th>[Vue warn] 文案</th><th>病根</th><th>本站出处</th></tr>
+    <tr><td>Extraneous non-props attributes...</td><td>多根组件 attrs 无处透传</td><td>25.3</td></tr>
+    <tr><td>Maximum recursive updates exceeded...</td><td>更新循环（调度器 100 层保护触发）</td><td>23.3</td></tr>
+    <tr><td>Hydration node mismatch...</td><td>服务端/客户端渲染结果不一致</td><td>36.3</td></tr>
+    <tr><td>xxx is called when there is no active component instance...</td><td>在 setup 同步阶段之外调了组合式 API（指针已还原）</td><td>19.4 / 4.5</td></tr>
+    <tr><td>Invalid watch source</td><td>watch source 传了原始值</td><td>9.8</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 读 warn 文案的姿势</span><br>
+    Vue 的 warn 文案几乎都自带「修复建议 + 文档链接」—— 别只看第一行，把整条 warn 读完整，
+    答案通常就写在里面。这也是 warn「dev 全开、生产全关」的原因：省体积 + 防内部信息泄露。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：错误处理</summary>
+    <div class="quiz-body">
+      <p>1. 为什么事件监听器里的错误也能被捕获？监听器是浏览器调用的啊。<br>
+         2. onErrorCaptured 返回 false 的语义是什么？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 因为你模板里的 @click 编译后不是裸函数 —— 它被 patchEvent 包进 invoker（第 15 章），
+        invoker 调用真实回调时走了 callWithAsyncErrorHandling。框架从不过问「谁调用的」，
+        它保证「经过框架的调用」都被包装。<br>
+        2. 「我已处理，停止向上传播」。适合埋点上报后吞掉错误，防止干扰上层逻辑；
+        不返回 false 则继续上溯，直到全局 errorHandler 或控制台兜底。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="error">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="compiler.html#syntax"><span class="dir">上一章</span><span class="t">← v-model 与事件修饰符</span></a>
+    <a class="next" href="#ssr"><span class="dir">下一章</span><span class="t">SSR 与 hydration →</span></a>
+  </div>
+</section>
+
+<!-- ============ 36 ssr ============ -->
+<section class="page" id="page-ssr">
+  <div class="kicker">第 36 章 · 边界与生态</div>
+  <h1>SSR 与 hydration：一棵 vnode 树，两台发动机</h1>
+  <p class="lead">
+    第 21 章埋了一个伏笔：为什么 createApp 要懒创建渲染器？本章揭晓 ——
+    同一套 runtime-core，配 DOM nodeOps 就能操作浏览器，配「字符串拼接 nodeOps」就能在服务器直出 HTML。
+    而客户端接手的过程叫 <b>hydration（水合）</b>。官方源码：
+    <code class="inline">runtime-core/src/hydration.ts</code> + <code class="inline">server-renderer</code> 包。
+  </p>
+
+  <h2>36.1 服务器端：renderToString 换一台发动机</h2>
+  <pre class="code" data-title="createSSRApp / renderToString 的架构（简化）"><code>// server-renderer 包的核心思路：
+// 把「操作真实 DOM」的 nodeOps 换成「操作字符串」的产物
+renderToString(app, (ctx) =&gt; {
+  // 遍历组件树 → 跑 render → 生成 vnode
+  // 元素：_push(`&lt;div class="box"&gt;`)   ← 不是 createElement！
+  // 文本：_push(escapeHtml(toDisplayString(text)))
+  // 组件：递归 renderToString 子组件
+  // 结束：_push(`&lt;/div&gt;`)
+});
+
+// ⭐ 对比第 15 章 createRenderer(renderOptions)：
+//    web:     nodeOps = { createElement: document.createElement, insert: parent.insertBefore, ... }
+//    server:  「nodeOps」= push('&lt;div&gt;') / push('&lt;/div&gt;') —— 纯字符串工艺
+// runtime-core 的渲染逻辑一行不改，只是「如何落盘」由注入方决定 —— 分层的胜利</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么 SSR 版渲染叫「不挂牌」</span><br>
+    服务器跑的 render 函数和浏览器<b>是同一个</b>（编译产物通用），只是输出端不同。
+    SSR 组件还会走 <code class="inline">ssrRender</code> 快速通道（第 33 章的另一台打印机），
+    跳过 vnode 创建直接拼字符串 —— 所以服务端开销远低于客户端渲染。
+  </div>
+
+  <h2>36.2 客户端：hydration 是「激活」而不是重建</h2>
+  <pre class="code" data-title="hydrate 的核心循环（hydration.ts 简化）"><code>function hydrate(vnode, container) {
+  // ⭐ 与 createApp.mount 的唯一区别：不调 hostCreateElement，
+  // 而是拿服务器渲染出的「现成 DOM」
+  const el = (vnode.el = container.firstChild);   // 认领已有节点
+
+  // 逐个核对：
+  //   tag 对不上 → dev 警告 Hydration node mismatch，粗暴重建
+  //   对上了    → 挂 el 引用、绑事件（patchEvent）、注册指令/过渡钩子
+  // 子节点递归 hydrate（children 数量对不上也会警告 + 重建分支）
+
+  // 静态子树：直接跳过核对（信任编译器，第 25 章）—— SSR 场景连 diff 都省了
+}
+
+// 入口：createSSRApp(App).mount('#app') 走 hydrate 分支
+//      createApp(App).mount('#app') 走全新 mount 分支</code></pre>
+  <div class="diagram">
+    <div class="stack-vert">
+      <div class="flow">
+        <span class="fbox gray">服务器</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">renderToString → HTML 字符串</span>
+        <span class="farrow">→</span>
+        <span class="fbox gray">浏览器先看到完整内容（首屏快 + SEO 可抓）</span>
+      </div>
+      <div class="flow">
+        <span class="fbox gray">客户端</span>
+        <span class="farrow">→</span>
+        <span class="fbox blue">hydrate：认领 DOM + 只绑事件与响应式</span>
+        <span class="farrow">→</span>
+        <span class="fbox rose">此后与纯 CSR 完全相同：数据变 → trigger → patch</span>
+      </div>
+    </div>
+    <div class="cap">水合之后，应用「接管」页面 —— 从第 23 章的调度循环开始，一切照旧</div>
+  </div>
+
+  <h2>36.3 Hydration mismatch 三大常见原因</h2>
+  <table>
+    <tr><th>原因</th><th>例子</th><th>修法</th></tr>
+    <tr><td>渲染依赖仅浏览器有的状态</td><td>首帧读 <code class="inline">window.innerWidth</code> / localStorage</td><td>onMounted 后再切换，或 &lt;ClientOnly&gt; 包裹</td></tr>
+    <tr><td>时间/随机值直出</td><td><code class="inline">{{ Date.now() }}</code>、随机 ID</td><td>用种子数据或服务端传值</td></tr>
+    <tr><td>无效 HTML 嵌套被浏览器"矫正"</td><td><code class="inline">&lt;p&gt;</code> 里放 <code class="inline">&lt;div&gt;</code>（浏览器会拆开结构）</td><td>修正标签嵌套 —— 浏览器解析时已改变 DOM，水合自然对不上</td></tr>
+  </table>
+  <div class="callout warn">
+    <span class="tag">⚠️ 「水合」不是免费的</span><br>
+    hydration 仍要下载并执行全部 JS、构建全部 vnode、逐节点核对 ——
+    所以 React 才有 RSC、Vue 才有懒水合（3.5 起官方内置 <code class="inline">hydrate-on-visible</code> /
+    <code class="inline">hydrate-on-idle</code> 等策略 + <code class="inline">&lt;Teleport defer&gt;</code>，
+    到了可视时机才激活对应组件）。
+    读源码时要记住：SSR 优化的是「首屏可见时间」，不是「可交互时间」。
+  </div>
+
+  
+  <h2>36.4 renderToString 的另一件产物：payload 与状态传送</h2>
+  <p>renderToString 返回 HTML 字符串之外，还会往传入的 <code class="inline">context</code> 对象里写「行李」：</p>
+  <pre class="code" data-title="context 的收集（server-renderer）"><code>const ctx = {};
+const html = await renderToString(app, ctx);
+// ctx.teleports   → Teleport 内容的 HTML（弹窗等挂到 body 的内容要单独搬运）
+// ctx.modules     → CSS 模块等资源的记录（SSR 样式注入用）
+// ctx.__asyncComponents / suspense 状态等
+
+// 组装完整响应：
+res.send(&#96;
+  &lt;div id="app"&gt;${html}&lt;/div&gt;                    // ① 主体
+  &lt;div&gt;${ctx.teleports?.body ?? ''}&lt;/div&gt;        // ② 传送门内容
+  &lt;script&gt;window.__INITIAL_STATE__ = ${serialize(storeState)}&lt;/script&gt;  // ③ 状态传送
+&#96;);</code></pre>
+  <p>
+    第 ③ 项是实战最容易漏的：服务端预取的数据（比如首屏列表）如果<b>不随 HTML 传给客户端</b>，
+    客户端复水后第一件事就是重新请求一遍 —— 首屏白快了，数据还是等。标准做法是把服务端
+    已有的 store 状态序列化进一个全局变量，客户端初始化 store 时直接注入（Pinia 官方文档的
+    SSR 章节就是这套流程的工程化封装）。
+  </p>
+  <div class="callout warn">
+    <span class="tag">⚠️ 状态传送的安全细节</span><br>
+    状态要序列化进 HTML，就逃不开 XSS 风险：<code class="inline">&lt;/script&gt;</code> 注入、
+    <code class="inline">%</code> 编码歧义都是经典洞。务必用框架推荐的序列化器（如
+    <code class="inline">devalue</code> / <code class="inline">@nuxt/devalue</code>），
+    不要手写 <code class="inline">JSON.stringify</code> 直接拼 —— 它对 <code class="inline">&lt;/script&gt;</code> 不设防。
+  </div>
+
+  <h2>36.4 流式渲染：从一次性水合到按需水合</h2>
+  <p>
+    同步 <code class="inline">renderToString</code> 有个先天缺陷：<b>最慢的组件拖住整个页面</b>。
+    Vue 3.3+ 的流式 API 把 HTML 分块发送：
+  </p>
+  <pre class="code" data-title="renderToPipeableStream（Node）"><code>import { renderToPipeableStream } from 'vue/server-renderer';
+
+renderToPipeableStream(app).pipe(res);
+// 产出顺序：
+// &lt;div id="app"&gt;&lt;main&gt;…静态与已就绪内容…&lt;/main&gt;
+// &lt;!--[--&gt;                                        ← 异步组件占位注释
+// &lt;/div&gt;                                         ← 骨架先到，用户立刻看到内容
+// （异步组件就绪后，分块补发占位处的 HTML 片段）</code></pre>
+  <table>
+    <tr><th>演进阶段</th><th>机制</th><th>体验</th></tr>
+    <tr><td>同步 SSR</td><td>整棵树渲染完再返回</td><td>首字节被最慢组件拖住</td></tr>
+    <tr><td>流式 SSR</td><td>骨架先发 + 占位注释，就绪后补发</td><td>首屏极快，异步块逐步浮现</td></tr>
+    <tr><td>懒水合（3.5+）</td><td>组件级策略：可视 / 空闲 / 首次交互时才水合</td><td>首屏 JS 开销大幅降低，可交互时间提前</td></tr>
+    <tr><td>选择性水合</td><td>客户端只 hydrate 已就绪/可视的部分</td><td>可交互时间进一步提前（Nuxt 等元框架在推进的方向）</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 <code class="inline">&lt;ClientOnly&gt;</code> 是最小号的「选择性」</span><br>
+    纯浏览器组件（window 依赖、编辑器、图表）在 SSR 里跳过渲染、客户端挂载后再上 ——
+    流式水合是它的规模化版本。「整个页面一次水合」正在被「哪里需要水哪里」逐步取代，
+    这条线在 React（RSC）、Vue（3.5 懒水合 → 3.6 Vapor 无 VDOM 渲染）上完全同步。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：SSR 与 hydration</summary>
+    <div class="quiz-body">
+      <p>1. createSSRApp 和 createApp 的产物差异在哪一步发生？<br>
+         2. hydration 只绑事件不建 DOM，那响应式数据呢？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 在 mount 时分岔：SSR app 的 mount 走 hydrate（认领现有 DOM），
+        普通 app 走 createVNode + render 全新挂载。app 对象、编译产物、组件定义完全一致。<br>
+        2. 照常初始化。组件的 setup、响应式系统、渲染 effect 全部照跑（effect 首次 run 时
+        因为 el 已存在而跳过 DOM 创建，只做依赖收集）—— 所以客户端仍要付一份完整 JS 的成本。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="ssr">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#error"><span class="dir">上一章</span><span class="t">← 错误处理：捕获与传播</span></a>
+    <a class="next" href="#custom"><span class="dir">下一章</span><span class="t">自定义渲染器实战 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 37 custom ============ -->
+<section class="page" id="page-custom">
+  <div class="kicker">第 37 章 · 边界与生态</div>
+  <h1>自定义渲染器实战：给 mini-vue3 换个画布</h1>
+  <p class="lead">
+    全书第 15 章留下的悬念终于引爆：<code class="inline">createRenderer(nodeOps)</code> 的注入点，
+    意味着 Vue 的渲染目标根本不必是 DOM。本章亲手写一个 <b>60 行的「画布渲染器」</b>，
+    让同一套组件语法跑在 canvas 上 —— 这也是小程序框架（uni-app / Taro）的全部底层原理。
+    本仓库的 <code class="inline">packages/runtime-dom</code> 就是你的参考答案。
+  </p>
+
+  <h2>37.1 注入点的完整清单</h2>
+  <p>
+    渲染器对宿主环境的全部要求就这一张表 —— 实现它们，就拥有了一个新平台：
+  </p>
+  <table>
+    <tr><th>nodeOps 方法</th><th>DOM 实现（本仓库已有）</th><th>画布渲染器（本章要写）</th></tr>
+    <tr><td><code class="inline">createElement</code></td><td>document.createElement</td><td>返回 { type, props, children } 描述对象</td></tr>
+    <tr><td><code class="inline">insert(el, parent, anchor)</code></td><td>parent.insertBefore</td><td>把描述对象挂进父的 children + 触发重绘</td></tr>
+    <tr><td><code class="inline">remove</code></td><td>parent.removeChild</td><td>从 children 删除 + 重绘</td></tr>
+    <tr><td><code class="inline">setElementText</code></td><td>el.textContent = ...</td><td>改描述对象并重绘</td></tr>
+    <tr><td><code class="inline">patchProp(el, key, prev, next)</code></td><td>class/style/事件/attr 分流（第 15 章）</td><td>记进 props —— 因为是全量重绘，无需 diff 属性</td></tr>
+    <tr><td><code class="inline">parentNode / nextSibling</code></td><td>DOM API</td><td>children 数组查找（Fragment 锚点靠它）</td></tr>
+  </table>
+
+  <h2>37.2 画布渲染器：一次「全量重绘」策略</h2>
+  <pre class="code" data-title="canvas nodeOps（教学完整版，~50 行）"><code>// 组件代码不用改！仍然 h('rect', { x: 10, y: 10, w: 80, h: 30, fill: 'green' })
+const canvasNodeOps = {
+  createElement(type) {
+    return { type, props: {}, children: [], text: '' };   // 描述对象，不碰 DOM
+  },
+  insert(el, parent, anchor) {
+    const idx = anchor ? parent.children.indexOf(anchor) : -1;
+    idx === -1 ? parent.children.push(el) : parent.children.splice(idx, 0, el);
+    draw(parent);                          // ⭐ 每次结构变化 → 全量重绘
+  },
+  remove(el) {
+    const parent = el.parent;
+    parent.children.splice(parent.children.indexOf(el), 1);
+    draw(parent);
+  },
+  setElementText(el, text) { el.text = text; draw(el); },
+  parentNode: (node) =&gt; node.parent,
+  nextSibling: (node) =&gt; {
+    const p = node.parent, i = p.children.indexOf(node);
+    return p.children[i + 1];
+  },
+  patchProp(el, key, prev, next) { el.props[key] = next; },
+};
+
+function draw(root) {
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  (function walk(nodes) {
+    for (const n of nodes) {
+      if (n.type === 'rect') {
+        ctx.fillStyle = n.props.fill;
+        ctx.fillRect(n.props.x, n.props.y, n.props.w, n.props.h);
+      } else if (n.type === 'circle') {
+        ctx.beginPath();
+        ctx.arc(n.props.x, n.props.y, n.props.r, 0, Math.PI * 2);
+        ctx.fillStyle = n.props.fill;
+        ctx.fill();
+      }
+      walk(n.children);
+    }
+  })(root.children);
+}
+
+// 用法 —— 与 web 端一字不差：
+createRenderer(canvasNodeOps).render(h(App), { children: [] });</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 你刚刚理解的，是整个小程序框架的地基</span><br>
+    uni-app / Taro 的原理 = 把这张表的右列换成「调小程序 setData / native 组件」。
+    Vue 团队自己的 <code class="inline">@vue/runtime-test</code>（单元测试用渲染器）也是同一思路：
+    输出一棵可断言的轻量树，而不是真 DOM。
+    <b>「框架核心不关心渲染目标」不是口号，是 nodeOps 这张接口表的物理现实。</b>
+  </div>
+  <div class="callout warn">
+    <span class="tag">⚠️ 两个工程细节</span><br>
+    ① 全量重绘在真实画布场景要用脏矩形 / requestAnimationFrame 合帧（本质又是第 23 章的批处理思想）；
+    ② 事件：canvas 上要自己做命中检测（hit test）转发给对应节点 —— patchEvent 里挂的 invoker
+    需要一个坐标 → 节点的反查表。这两点都是开源 canvas 渲染器（如 vue-canvas-effect 类项目）的核心工作量。
+  </div>
+
+  <h2>37.3 全书视图：你已经站在生态的哪一层</h2>
+  <table>
+    <tr><th>层</th><th>内容</th><th>本站章节</th></tr>
+    <tr><td>响应式内核</td><td>effect / track / trigger / ref / computed / watch</td><td>第 2~12 章</td></tr>
+    <tr><td>运行时</td><td>vnode / patch / diff / 组件 / 调度 / 内置组件</td><td>第 15~24 章 + 25~29 章</td></tr>
+    <tr><td>编译器</td><td>parse / transform / codegen / 语法糖</td><td>第 30~34 章</td></tr>
+    <tr><td>工程边界</td><td>错误处理 / SSR / 自定义渲染器</td><td>第 35~37 章（本章）</td></tr>
+    <tr><td>生态适配</td><td>router（响应式驱动的条件渲染）、pinia（effectScope + provide）</td><td>你会心一笑，无需再学</td></tr>
+  </table>
+
+  
+  <h2>37.4 进阶作业：给画布渲染器补上事件系统</h2>
+  <p>第 37.2 节的 nodeOps 能画不能点。事件缺失的根源：canvas 只有一个真实 DOM，
+  事件都落在它身上，<b>「点中了哪个节点」要自己算</b>：</p>
+  <pre class="code" data-title="命中检测 + 事件转发（作业施工图）"><code>// patchProp 的 onXxx 分支：只存引用，不 addEventListener（没有真实元素可挂）
+patchProp: (el, key, prev, next) =&gt; {
+  if (/^on/.test(key)) { el.props[key] = next; return; }   // onClick 等
+  el.props[key] = next;
+}
+
+canvas.addEventListener('pointerdown', (e) =&gt; {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  // ⭐ 倒序遍历（最后画的在最上层）→ 深度优先命中检测
+  const hit = (nodes) =&gt; {
+    for (let i = nodes.length - 1; i &gt;= 0; i--) {
+      const n = nodes[i];
+      const child = hit(n.children) || (inRect(x, y, n.props) ? n : null);
+      if (child) return child;
+    }
+  };
+  const target = hit(root.children);
+  if (target?.props.onPointerDown) target.props.onPointerDown(e);  // 转发给节点
+});
+// 作业目标：pointermove / pointerleave / 拖拽选中 —— 全部基于这套 hit test
+// 进阶：把 handler 存引用 + 合帧派发（回忆第 15 章 invoker 与第 23 章批处理）</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 做完这个作业你会真正理解什么</span><br>
+    浏览器替 DOM 渲染器干了三件隐形的事：命中检测（事件路由）、层叠顺序（z-index）、
+    焦点管理。自己实现 canvas 渲染器时这三件全部现出原形 ——
+    这也是所有 canvas 应用框架（Fabric.js、Konva、飞书白板）的核心工程量所在。
+    做完它，你对「渲染器分层」的理解就从「接口表」升级到「浏览器到底替我们做了什么」。
+  </div>
+
+  <h2>37.4 命中检测：canvas 上的「事件冒泡」是自己写的</h2>
+  <p>
+    DOM 里浏览器替你做了 hit test（点谁高亮谁），canvas 渲染器必须自己实现 ——
+    这是 nodeOps 协议之外、每个自定义渲染器都逃不掉的一课：
+  </p>
+  <pre class="code" data-title="命中检测（~20 行）"><code>canvas.addEventListener('click', (e) =&gt; {
+  const { x, y } = getCanvasPos(e);          // 屏幕坐标 → canvas 内坐标
+  const target = hitTest(rootNode, x, y);    // 从「最上层」往下找
+  if (target) bubble(target, 'click', e);    // 找到 → 模拟冒泡
+});
+
+function hitTest(node, x, y) {
+  // 逆序遍历：后画的上层优先命中（画家算法）
+  for (let i = node.children.length - 1; i &gt;= 0; i--) {
+    const hit = hitTest(node.children[i], x, y);
+    if (hit) return hit;
+  }
+  return contains(node, x, y) ? node : null; // 矩形：范围判断；圆：(x-cx)²+(y-cy)² ≤ r²
+}
+
+function bubble(node, event, e) {
+  let cur = node;
+  while (cur) {
+    const fn = cur.props['on' + event];
+    if (fn &amp;&amp; fn(e) === false) break;        // 返回 false = 模拟 stopPropagation
+    cur = cur.parent;                        // 沿 parent 链上溯 = 冒泡
+  }
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 这段代码解释了一个架构事实</span><br>
+    patchEvent（第 15 章）只负责「把回调挂到节点的 props 上」，<b>事件的触发链是宿主环境的事</b>：
+    DOM 有浏览器冒泡，canvas 要手写逆序命中 + 链上溯，终端渲染器可能根本没有「点击」概念。
+    所以官方 createRenderer 的注入点里没有事件 —— 事件天生属于平台层。
+    这正是 37.3 提到的「逻辑树 ≠ 平台」的又一处体现。
+  </div>
+
+<details class="quiz">
+    <summary>自测一下：自定义渲染器</summary>
+    <div class="quiz-body">
+      <p>1. 画布渲染器为什么可以不做属性 diff（patchProp 直接覆盖）？<br>
+         2. Teleport 在画布渲染器里还能用吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 因为每次变更都是全量重绘：props 覆盖后重画的成本 ≈ diff 后最小更新的成本。
+        「要不要 diff」永远取决于宿主环境的写操作成本 —— DOM 写贵所以 diff，画布画便宜所以直画。<br>
+        2. 能。Teleport 只是「挂载到另一个目标」，画布渲染器里 target 可以是另一个画布/图层 ——
+        内置组件依赖的只是 vnode 层协议，不依赖 DOM。这正是分层的威力。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="custom">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#ssr"><span class="dir">上一章</span><span class="t">← SSR 与 hydration</span></a>
+    <a class="next" href="ecosystem.html#hmr"><span class="dir">下一章</span><span class="t">HMR 热更新原理 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+<script src="assets/labs/common.js?v=1"></script>
+<script src="assets/labs/frontier.js?v=1"></script>
+</body>
+</html>

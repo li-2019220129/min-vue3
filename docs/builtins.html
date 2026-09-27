@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 内置组件深读</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<section class="page" id="page-keepalive">
+  <div class="kicker">第 28 章 · 内置组件深读</div>
+  <h1>KeepAlive 深读：缓存的第三个容器</h1>
+  <p class="lead">
+    第 24 章给过三个机关的速览，本章进源码：<b>缓存表的读写、LRU 修剪、DOM 的进出仓库、
+    include/exclude 的响应式生效</b>—— 全部在 200 行的 setup 里。
+  </p>
+
+  <h2>28.1 setup 骨架：缓存表与两个队列</h2>
+  <pre class="code" data-title="components/KeepAlive.ts（骨架）"><code>export default {
+  name: "KeepAlive",
+  __isKeepAlive: true,                    // ⭐ 身份暗号：patch 时识别用
+  props: { include: [String, RegExp, Array], exclude: ..., max: Number },
+  setup(props, { slots }) {
+    const instance = getCurrentInstance();
+    const pendingUnmount = {};            // key → 正在卸载中的 vnode（防重复销毁）
+    const cache = new Map();              // key → 缓存的 vnode（含 el/组件状态）
+    const keys = new Set();               // 维护 LRU 顺序
+    let current = null;
+
+    // ⭐ 卸载回调：从缓存里真正销毁一个 vnode（而不是页面上）
+    function pruneCacheEntry(key) {
+      const cached = cache.get(key);
+      if (cached &amp;&amp; (!current || !isSameVNodeType(cached, current))) {
+        unmount(cached);                  // 真销毁
+      } else if (current) {
+        resetShapeFlag(cached);           // 还在展示中 → 只摘 KEPT_ALIVE 标记，等以后走正常卸载
+      }
+      cache.delete(key);
+      keys.delete(key);
+    }
+
+    // ⭐ include/exclude 是响应式的：变化时全量重筛（注意 exclude 的谓词要取反！）
+    watch(() =&gt; [props.include, props.exclude], ([inc, exc]) =&gt; {
+      inc &amp;&amp; pruneCache(name =&gt; matches(inc, name));    // 不在白名单 → 逐出
+      exc &amp;&amp; pruneCache(name =&gt; !matches(exc, name));   // 命中黑名单 → 逐出
+    }, { flush: "post", deep: true });
+    ...
+  },
+};</code></pre>
+
+  <h2>28.2 render：命中与未命中的两条路</h2>
+  <pre class="code" data-title="render 函数（核心分支）"><code>return () =&gt; {
+  const children = slots.default();
+  const vnode = children[0];
+  const key = vnode.key == null ? comp : vnode.key;
+  let vnodeToReturn;
+  if (cache.has(key)) {
+    // ⭐ 命中：用缓存 vnode（el 还活着！），只更新内容
+    vnodeToReturn = cloneVNode(cachedVNode);
+    vnodeToReturn.el = cachedVNode.el;          // DOM 直接复用
+    vnode.component = cachedVNode.component;    // 实例也复用（状态全在）
+    keys.delete(key); keys.add(key);            // LRU：摸一下就排到队尾
+  } else {
+    keys.add(key);                              // 未命中 → 正常挂载 + 登记
+  }
+  if (max &amp;&amp; keys.size &gt; parseInt(max, 10)) pruneCacheEntry(keys.values().next().value);
+  return vnodeToReturn;
+};</code></pre>
+
+  <h2>28.3 挪移魔法：renderer 里的 KeepsAlive 钩子</h2>
+  <pre class="code" data-title="renderer.ts 里的对接点"><code>// processComponent 识别 __isKeepAlive 后，ctx.bm/m 等钩子被换上专属实现：
+sharedContext.renderer = {
+  createElement, insert, remove, ...
+  // deactivate：DOM 移入隐藏仓库（不是卸载！）
+  deactivate(vnode) {
+    const vnodeRef = vnode;
+    hostInsert(vnodeRef.el!, storageContainer, null);   // ⭐ 搬进隐藏容器
+    queuePostRenderEffect(() =&gt; vnode.component?.deactivatedhook ...);  // post 队列
+  },
+  // activate：DOM 搬回页面
+  activate(vnode, container, anchor) {
+    hostInsert(vnode.el!, container, anchor);           // ⭐ 原样搬回
+    queuePostRenderEffect(() =&gt; vnode.component?.activatedhook ...);
+  },
+};
+// ⭐ 这就是「状态全保留」的物理原因：DOM 节点和组件实例从未销毁，只是换了容器</code></pre>
+
+  <h2>28.4 什么时候缓存会「真的销毁」</h2>
+  <table>
+    <tr><th>触发</th><th>行为</th></tr>
+    <tr><td>include/exclude 变化后不再匹配</td><td>pruneCacheEntry → 摘标记 → 走正常 unmount（触发真正的 onUnmounted）</td></tr>
+    <tr><td>超过 max（LRU）</td><td>最久未访问的 key 被逐出销毁</td></tr>
+    <tr><td>KeepAlive 自身被卸载</td><td>beforeUnmount 里全量 pruneCacheEntry</td></tr>
+  </table>
+
+  <details class="quiz">
+    <summary>自测一下：KeepAlive 深读</summary>
+    <div class="quiz-body">
+      <p>1. 缓存命中后为什么还要 cloneVNode？<br>
+         2. 被 KeepAlive 缓存的组件，它内部注册的 watch/定时器会停吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 新一轮渲染要有自己的 vnode 对象（el/component 指向缓存），直接复用旧 vnode 会因
+        patch 的 oldVNode === vnode 短路（22.4）而跳过本该有的更新。<br>
+        2. 不会停 —— 实例活着、effectScope 活着，watch 照常响应（这正是 keep 的本意）。
+        若想在失活时暂停轮询，用 onDeactivated/onActivated 手动控制，或改用 include 白名单让它被真正卸载。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="keepalive">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="runtime.html#transition"><span class="dir">上一章</span><span class="t">← Transition：进出场原理</span></a>
+    <a class="next" href="#suspense"><span class="dir">下一章</span><span class="t">Suspense 深读 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 29 suspense ============ -->
+<section class="page" id="page-suspense">
+  <div class="kicker">第 29 章 · 内置组件深读</div>
+  <h1>Suspense 深读：计数器状态机</h1>
+  <p class="lead">
+    从 24.5 的小节升级成完整章：deps 计数器怎么数、fallback 和 content 怎么切换、
+    嵌套 Suspense 怎么防竞态 —— 约 900 行的官方源码，主干其实只有一条状态机。
+  </p>
+
+  <h2>29.1 契约：async setup 的返回值去哪了</h2>
+  <pre class="code" data-title="异步 setup 的处理（mountComponent 内）"><code>// setupComponent 里：
+if (isPromise(setupResult)) {
+  // ⭐ 组件自己不管等待 —— 把 Promise 挂到 vnode 上，向上交接
+  vnode.asyncDep = setupResult;
+  // dev 下给个占位注释节点，防止「空渲染」告警
+}
+// Suspense 的 registerDep 接住这个 Promise：
+function registerDep(instance, setupPromise) {
+  suspense.deps++;                              // ⭐ 计数 +1
+  setupPromise.then(() =&gt; {
+    // Promise 就绪 → 真正开始挂载这个组件
+    setupComponent(instance);
+    ...
+    suspense.deps--;                            // ⭐ 计数 -1
+    if (suspense.deps === 0) suspense.resolve();  // 全员就绪 → 切换
+  });
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 设计精髓：组件不知道 Suspense 的存在</span><br>
+    async setup 只管返回 Promise；「等它、先显示 fallback、就绪后切换」全部由树上层的 Suspense 编排。
+    关注点分离做到极致 —— 但也正因如此，<b>async setup 必须有 Suspense 边界</b>：
+    没有 Suspense 时 registerDep 根本不会被调用，组件只渲染一个空注释占位，内容永远不显示
+    （dev 模式有警告）。
+  </div>
+
+  <h2>29.2 状态机：pendingId 与双分支</h2>
+  <table>
+    <tr><th>阶段</th><th>deps</th><th>显示什么</th></tr>
+    <tr><td>初始 pending</td><td>&gt; 0</td><td>fallback 插槽（骨架屏）</td></tr>
+    <tr><td>resolve（全部就绪）</td><td>= 0</td><td>默认插槽内容（新子树 mount 进真实容器）</td></tr>
+    <tr><td>子树里又有新 async 组件</td><td>再次 &gt; 0</td><td>pendingId++ → 新一轮等待（旧内容保持显示）</td></tr>
+    <tr><td>unmount</td><td>—</td><td>isUnmounted = true，残留 Promise 的回调全部短路</td></tr>
+  </table>
+  <pre class="code" data-title="resolve 的切换（走第 23 章 post 队列）"><code>function resolve() {
+  // 新内容先挂到隐藏分支，就绪后整体替换 —— 保证「要么旧的、要么完整新的」
+  const { vnode: suspenseVNode } = suspense;
+  // ... mount 新子树到 suspense 容器 ...
+  if (suspense.deps === 0) {
+    queuePostRenderEffect(() =&gt; {
+      // 切换：fallback 分支 unmount，content 分支 activate
+      // 有 Transition 时这里的切换自带 27 章的 enter 动画
+    }, parentSuspense);
+  }
+}</code></pre>
+
+  <h2>29.3 嵌套与竞态：pendingId 的作用</h2>
+  <p>
+    Suspense 里再放 Suspense（常见：页面级 + 组件级各一个）：子 Suspense 对父来说也是一个
+    「异步依赖」，父的 deps 会等子的 resolve。竞态场景：<b>快速切换路由</b>导致旧请求未归新请求已发 ——
+    <code class="inline">pendingId</code> 让旧一轮的 resolve 回调发现「自己已过期」而自动作废，
+    和第 20 章 invalidateJob 的「撤单」思想同源。
+  </p>
+
+  <details class="quiz">
+    <summary>自测一下：Suspense 深读</summary>
+    <div class="quiz-body">
+      <p>1. 没有 Suspense 包裹时，async setup 组件会发生什么？<br>
+         2. fallback 里能访问子组件的数据吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. 不会阻塞 —— dev 模式警告「async setup() is used without a suspense boundary」，
+        渲染器只给该组件位置插一个<b>空注释占位节点</b>：没有 Suspense 边界时 registerDep
+        不会被调用，渲染 effect 永远不会建立，组件内容永远等不到显示。
+        Suspense 存在时才变成「异步编排 + fallback」。<br>
+        2. 不能。fallback 显示时子组件实例尚未创建完成（Promise 未 resolve）——
+        骨架屏只能用静态内容或父级数据。这也是「骨架屏数据放父级」的原因。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="suspense">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#keepalive"><span class="dir">上一章</span><span class="t">← KeepAlive 深读</span></a>
+    <a class="next" href="compiler.html#compiler"><span class="dir">下一章</span><span class="t">编译器总览：模板到 render →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+</body>
+</html>

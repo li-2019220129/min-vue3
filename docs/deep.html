@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 响应式源码精读</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 13 collections ============ -->
+<section class="page" id="page-collections">
+  <div class="kicker">第 13 章 · 响应式源码精读</div>
+  <h1>Set/Map 响应式：另一套 Handler</h1>
+  <p class="lead">
+    第 5.7 节揭了病根：Map/Set 的增删查是<b>方法调用</b>，Proxy 的 set 拦截器全程缺席。
+    本章把官方 <code class="inline">collectionHandlers</code> 完整实现一遍 —— 这是官方 reactivity 里
+    与 baseHandlers 并列的另一座山，也是 mini-vue3 的最后一块拼图。
+  </p>
+
+  <h2>13.1 全景：两种对象，两套拦截策略</h2>
+  <table>
+    <tr><th></th><th>普通对象/数组</th><th>Map / Set / WeakMap / WeakSet</th></tr>
+    <tr><td>操作形式</td><td>属性读写 <code class="inline">obj.k = v</code></td><td>方法调用 <code class="inline">map.set(k, v)</code></td></tr>
+    <tr><td>可拦截点</td><td>get / set / deleteProperty / has / ownKeys</td><td>只有 get（拦截「取方法」这个动作）</td></tr>
+    <tr><td>策略</td><td>拦截器里顺手 track/trigger</td><td>get 返回<b>重写过的方法</b>，track/trigger 埋在方法体里</td></tr>
+    <tr><td>官方文件</td><td>baseHandlers.ts</td><td>collectionHandlers.ts（~450 行）</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么只能靠 get？</span><br>
+    Proxy 的拦截 Trap 是按「语法动作」划分的：<code class="inline">map.set(...)</code> 在语法上只有一次
+    <b>属性读取</b>（读 set 成员）+ 一次函数调用。函数调用本身不在 Proxy 的管辖范围 ——
+    所以唯一的机会是 get：返回一个「我们改写过的 set 方法」，调用方的代码一行没变，行为已经被换走了。
+  </div>
+
+  <h2>13.2 instrumentations：把 track/trigger 埋进方法体</h2>
+  <pre class="code" data-title="完整实现（可直接抄进项目）"><code>export function createInstrumentations() {
+  const instrumentations: any = {};
+  // ── 读方法：方法体里 track ──
+  ["get", "has", "forEach"].forEach(key =&gt; {
+    instrumentations[key] = function (this: any, ...args: any[]) {
+      const target = this.__v_raw;            // 从代理拿回原始对象
+      const raw = toRaw(target);
+      const targetIsMap = isMap(raw);
+      track(raw, key);                        // key 本身也要登记（如 map.get 的 key 变化）
+      track(raw, ITERATE_KEY);                // 简化版：粗粒度全登记
+      return Reflect.get(
+        targetMapOrSelf(target), key, ...args // this 必须是原始 target（内部槽位不认代理）
+      );
+    };
+  });
+  // ── 写方法：方法体里 trigger ──
+  ["set", "add", "delete", "clear"].forEach(key =&gt; {
+    instrumentations[key] = function (this: any, ...args: any[]) {
+      const target = toRaw(this);
+      const had = isMap(target) ? target.has(args[0]) : target.has(args[0]);
+      const prev = key === "set" ? target.get(args[0]) : undefined;
+      const res = target[key](...args);       // 先真正执行
+      if (!had) trigger(target, "add", args[0]);
+      else if (key === "set" &amp;&amp; hasChanged(args[0], prev)) trigger(target, "set", args[0]);
+      if (key === "delete" &amp;&amp; had) trigger(target, "delete", args[0]);
+      return res;
+    };
+  });
+  return instrumentations;
+}</code></pre>
+  <h2>13.3 接线：get 拦截器认出集合</h2>
+  <pre class="code" data-title="baseHandlers 的 get 开头加一条分支"><code>function createGetter(isReadonly = false, shallow = false) {
+  return function get(target, key, receiver) {
+    if (key === ReactiveFlags.IS_REACTIVE) return true;
+    // ⭐ 集合分支：get/has/forEach/size... 命中重写表 → 返回重写方法
+    if (isCollection(target) &amp;&amp; hasOwn(instrumentations, key)) {
+      track(target, key);
+      return Reflect.get(instrumentations, key);   // 注意：不传 receiver
+    }
+    ... // 原有普通对象逻辑
+  };
+}</code></pre>
+
+  <h2>13.4 三个魔鬼细节</h2>
+  <table>
+    <tr><th>细节</th><th>原因</th></tr>
+    <tr><td>方法内 <code class="inline">this</code> 必须是原始 target</td><td>Map 的内部槽位（[[Entries]]）不认代理 —— 把 proxy 传进去会静默失败或死循环</td></tr>
+    <tr><td><code class="inline">size</code> 是 accessor 不是方法</td><td>要用 <code class="inline">Object.getOwnPropertyDescriptor</code> 取 getter 再手动 track + call</td></tr>
+    <tr><td>迭代方法依赖 ITERATE_KEY</td><td>forEach/keys/entries 影响「整个集合的形状」，统一登记到哨兵 key（5.5）</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="tag">💡 验收标准</span><br>
+    实现完成后，这三段代码必须全绿：<code class="inline">map.set 后视图更新</code>、
+    <code class="inline">map.delete 后视图更新</code>、<code class="inline">forEach 依赖在新增键时更新</code> ——
+    和第 44 章的渲染器验收一样，写测试再动手。
+  </div>
+
+  <details class="quiz">
+    <summary>自测一下：集合拦截器</summary>
+    <div class="quiz-body">
+      <p>1. 为什么重写方法时 this 不能传 receiver？<br>
+         2. <code class="inline">reactive(new Map())</code> 后 <code class="inline">map.size++</code> 这类操作存在吗？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. Map/Set 的数据存在内部槽位里，方法内部访问槽位时要求 this 是真实 Map 实例；
+        代理没有这些槽位，传 receiver 会让方法查不到数据。<br>
+        2. 不存在 —— size 是只读 accessor。改集合只能走 set/add/delete/clear 这些方法，
+        而它们全被 instrumentations 接管了，这就是「全覆盖」的含义。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="collections">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="advanced.html#practice"><span class="dir">上一章</span><span class="t">← 实战心法：避坑指南</span></a>
+    <a class="next" href="#linkedlist"><span class="dir">下一章</span><span class="t">官方 3.5 版精读 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 14 linkedlist ============ -->
+<section class="page" id="page-linkedlist">
+  <div class="kicker">第 14 章 · 响应式源码精读</div>
+  <h1>官方 3.5 版 reactivity 精读</h1>
+  <p class="lead">
+    教学版的「Map + 数组 + 双指针」是思想的教学化。官方从 3.4 起用<b>双向链表</b>重写了整个依赖系统，
+    3.5 又补上了<b>版本计数</b>这最后一块拼图（并删掉了四档脏标记）—— 这是读 vuejs/core 真源码时
+    最大的阅读障碍。本章当你的字典，逐行对照教学版把 3.5 的正版走通
+    （至于 3.6 的 alien-signals 重写，见第 51 章展望）。
+  </p>
+
+  <h2>14.1 Dep 与 Link：两个类打天下</h2>
+  <pre class="code" data-title="官方 dep.ts 的全部骨架（3.5）"><code>export class Dep {
+  version = 0;             // ⭐ 每次 trigger +1 —— 「对账」的依据
+  activeLink?: Link;       // 当前正在 track 本 dep 的那条线（复用判断用）
+  subs?: Link;             // 订阅者双向链的「尾」指针
+  map?: KeyToDepMap;       // 回指所属名册 ┐ 订阅者归零时自动销户：
+  key?: unknown;           // 回指自己的属性名 ┘ removeSub 里 map.delete(key)
+  sc: number = 0;          // 订阅者计数（subscriber count）
+  computed?: ComputedRefImpl; // 这个 dep 属于哪个 computed（可没有）
+}
+
+export class Link {
+  sub: Subscriber;         // 这条线连着谁（effect 或 computed —— 都是「订阅者」）
+  dep: Dep;                //   连着哪个 dep
+  version: number;         // ⭐ 登记时快照的 dep.version —— 去重 + 过期判定
+  nextDep?: Link;  prevDep?: Link;   // effect 侧双向链（= 教学版 effect.deps 数组）
+  nextSub?: Link;  prevSub?: Link;   // dep 侧双向链（订阅者名单）
+  prevActiveLink?: Link;   // Link 复用时的暂存位
+}</code></pre>
+  <div class="callout deep">
+    <span class="tag">🧠 为什么是两个类，而不是 Map？</span><br>
+    dep 与订阅者是<b>多对多</b>关系：一个 effect 读 N 个属性，一个属性被 N 个 effect 读。
+    教学版用「Map + 反向数组」表达；官方把<b>每一条「谁订阅了谁」的关系</b>做成一个 Link 对象，
+    让它同时挂在两条双向链上 —— dep 沿它遍历订阅者，订阅者沿它遍历自己的依赖。
+    结构即索引，不再需要哈希表这一层间接。
+  </div>
+  <div class="diagram">
+    <div class="flow">
+      <span class="fbox blue">dep.subs（尾）</span>
+      <span class="farrow">⇄</span>
+      <span class="fbox">Link#1(effect-渲染)</span>
+      <span class="farrow">⇄</span>
+      <span class="fbox">Link#2(effect-watch)</span>
+      <span class="farrow">⇄</span>
+      <span class="fbox gray">Link#3(computed) = 链头</span>
+    </div>
+    <div class="cap">一条 dep 挂一串 Link（新订阅的接到尾部）；每个 Link 同时挂在 effect 侧的另一条双向链上（nextDep/prevDep）</div>
+  </div>
+
+  <h2>14.2 Dep.track()：登记线的完整生命</h2>
+  <pre class="code" data-title="官方 dep.ts（节选，对照教学版 trackEffect）"><code>track(debugInfo?): Link | undefined {
+  // 没人订阅、tracking 被关、自己 track 自己（computed 求值）→ 不登记
+  if (!activeSub || !shouldTrack || activeSub === this.computed) return;
+
+  let link = this.activeLink;
+  if (link === undefined || link.sub !== activeSub) {
+    // ① 没有可复用的线 → 新建一条
+    link = this.activeLink = new Link(activeSub, this);
+    //    挂到 activeSub 的 deps 双向链「尾」（对应教学版 deps[_depsLength++] = dep）
+    if (!activeSub.deps) {
+      activeSub.deps = activeSub.depsTail = link;
+    } else {
+      link.prevDep = activeSub.depsTail;
+      activeSub.depsTail!.nextDep = link;
+      activeSub.depsTail = link;
+    }
+    addSub(link);              // 再挂到本 dep 的订阅者链（subs 尾插，sc++）
+  } else if (link.version === -1) {
+    // ② 上一轮的旧线还在（run 前被 prepareDeps 置了 -1）→ 直接复用！
+    link.version = this.version;          // 同步版本号 = 重新生效
+    if (link.nextDep) { /* 已不在链尾 → 摘下来重接尾部，维持「本轮读取顺序」 */ }
+  }
+  return link;
+}
+
+function addSub(link: Link) {
+  link.dep.sc++;                           // 订阅者计数
+  if (link.sub.flags &amp; EffectFlags.TRACKING) {
+    const computed = link.dep.computed;
+    // ⭐ computed 迎来第一个订阅者：把 computed 也「懒激活」地订阅到它自己的依赖上
+    if (computed &amp;&amp; !link.dep.subs) {
+      computed.flags |= EffectFlags.TRACKING | EffectFlags.DIRTY;
+      for (let l = computed.deps; l; l = l.nextDep) addSub(l);
+    }
+    const currentTail = link.dep.subs;     // 尾插：subs 永远指向最后一个订阅者
+    if (currentTail !== link) {
+      link.prevSub = currentTail;
+      if (currentTail) currentTail.nextSub = link;
+    }
+    link.dep.subs = link;
+  }
+}</code></pre>
+  <p>
+    和教学版逐行对上：①新建 Link = 「dep.set(effect, trackId) + deps[_depsLength++] = dep」；
+    ②复用旧线 = 「dep.get(effect) === trackId 则跳过」。官方比教学版省的是：
+    <b>复用一条线不用动 Map，连对象都不用新建</b> —— 上轮的 Link 换个版本号就再上岗。
+  </p>
+
+  <h2>14.3 触发：version++ → notify → batch</h2>
+  <pre class="code" data-title="官方 dep.ts（节选）"><code>trigger(debugInfo?) {
+  this.version++;            // ① 账本 +1（所有持有快照的 Link 瞬间「过期」）
+  globalVersion++;           // ② 全局账本 +1（computed 快路径）
+  this.notify(debugInfo);
+}
+notify(debugInfo?) {
+  startBatch();
+  for (let link = this.subs; link; link = link.prevSub) {
+    // ③ 从「尾」向「头」遍历 = 按登记顺序正序通知；只登记不执行
+    if (link.sub.notify()) {
+      (link.sub as ComputedRefImpl).dep.notify();  // computed 返回 true → 继续向上传播
+    }
+  }
+  endBatch();                // ④ 批次收口：统一执行所有被登记的 effect（第 5.6 节）
+}</code></pre>
+  <table>
+    <tr><th>操作</th><th>教学版</th><th>官方 3.5</th></tr>
+    <tr><td>登记去重</td><td><code class="inline">dep.get(effect) !== _trackId</code>（Map 查询）</td><td><code class="inline">activeLink</code> 一眼看到「本 dep 当前活跃的线」，对象指针直查</td></tr>
+    <tr><td>注销过期依赖</td><td>从 _depsLength 起遍历数组 + dep.delete</td><td>沿 deps 链摘节点：prevDep.nextDep = nextDep —— 每条线 O(1)</td></tr>
+    <tr><td>触发全部订阅</td><td>遍历 Map 再拷贝数组防污染</td><td>从 subs（尾）沿 prevSub 遍历 —— 天然「登记顺序」，无拷贝</td></tr>
+  </table>
+  <div class="callout deep">
+    <span class="tag">🧠 通知顺序为什么是「从尾向头」？</span><br>
+    新订阅者永远接到链尾（subs 指向尾）。从尾向头遍历 = 按<b>登记的先后顺序</b>触发 ——
+    先来的人先响应，与组件的创建/订阅顺序一致，「父先子后」的稳定性由此维持。
+    5.6 节的 batch 队列会再把它摆回正序执行，两道工序合起来就是「登记序 = 执行序」。
+  </div>
+
+  <h2>14.4 清理与脏检查：version=-1 与 globalVersion</h2>
+  <pre class="code" data-title="官方 effect.ts（节选）"><code>// ── 每次 run 前后的一对钩子 ──
+function prepareDeps(sub) {
+  for (let link = sub.deps; link; link = link.nextDep) {
+    link.version = -1;                 // ⭐ 全部旧线标记「待观察」：不算数，但先留着
+    link.prevActiveLink = link.dep.activeLink;
+    link.dep.activeLink = link;        // 告诉每个 dep「本轮可能轮到你」
+  }
+}
+function cleanupDeps(sub) {
+  let head, tail = sub.depsTail, link = tail;
+  while (link) {
+    const prev = link.prevDep;
+    if (link.version === -1) {         // 跑完还是 -1 → 本轮真没读它 → 过期
+      removeSub(link);                 //   从 dep 的订阅者链上摘掉
+      removeDep(link);                 //   从 effect 的 deps 链上摘掉
+    } else head = link;                // 复用过的线：留下
+    link.dep.activeLink = link.prevActiveLink;
+    link = prev;
+  }
+  sub.deps = head; sub.depsTail = tail;
+}
+// ── 脏检查：版本号逐条对账 ──
+function isDirty(sub) {
+  for (let link = sub.deps; link; link = link.nextDep) {
+    if (
+      link.dep.version !== link.version ||
+      (link.dep.computed &amp;&amp;
+        (refreshComputed(link.dep.computed) || link.dep.version !== link.version))
+    ) return true;
+  }
+  return false;
+}</code></pre>
+  <p>
+    教学版的清理是「数组截断」：写指针之后的全是垃圾。官方改成「<b>先挂起，再清算</b>」：
+    run 前把所有旧线的 version 置 -1，fn 跑的过程中 track 到谁谁复活（version 同步成新值），
+    跑完仍是 -1 的才被 cleanupDeps 摘除。换来一个教学版没有的能力：
+    <b>复用的线连对象都不用新建</b> —— 分支没变的轮次里，一次对象分配都不发生。
+  </p>
+  <p>
+    而 <code class="inline">isDirty</code> 就是 2.5 节「版本号记账」的落地：逐条比对
+    <code class="inline">link.dep.version !== link.version</code>；遇到 computed 依赖则递归
+    <code class="inline">refreshComputed</code> —— 内部先查全局 <code class="inline">globalVersion</code>
+    快路径（世界根本没变过 → 秒回），重算后<b>值没变就不涨 version</b>，下游连重跑都省了
+    （第 8 章差异表在这里落地）。3.5 还顺手做了 dep 级 GC：
+    <code class="inline">removeSub</code> 里 <code class="inline">--dep.sc === 0</code> 时执行
+    <code class="inline">dep.map.delete(dep.key)</code> —— 没有粉丝的名册条目直接销户，
+    大对象的部分属性不再被死死挂着。
+  </p>
+
+  <h2>14.5 概念映射字典：教学版 ↔ 官方 3.5</h2>
+  <table>
+    <tr><th>教学版</th><th>官方 3.5</th></tr>
+    <tr><td><code class="inline">activeEffect</code></td><td><code class="inline">activeSub</code>（effect 和 computed 都是 Subscriber）</td></tr>
+    <tr><td><code class="inline">dep = Map&lt;effect, trackId&gt;</code></td><td><code class="inline">Dep</code> 类 + subs 链上每条 <code class="inline">Link</code>（version 快照）</td></tr>
+    <tr><td><code class="inline">effect.deps[]</code> 数组</td><td>effect 侧 Link 双向链（deps / depsTail）</td></tr>
+    <tr><td><code class="inline">_trackId</code> 场次号</td><td><code class="inline">dep.version</code> + <code class="inline">link.version</code> 对账</td></tr>
+    <tr><td><code class="inline">_depsLength</code> 写指针</td><td><code class="inline">prepareDeps / cleanupDeps</code> 的 version=-1 标记法</td></tr>
+    <tr><td><code class="inline">_dirtyLevel</code> 脏档位</td><td>已删除 —— isDirty 现场对账 + globalVersion 快路径</td></tr>
+    <tr><td><code class="inline">dep.cleanup()</code> 自销毁</td><td><code class="inline">removeSub</code> 中 <code class="inline">--dep.sc === 0</code> → <code class="inline">dep.map.delete(dep.key)</code></td></tr>
+    <tr><td><code class="inline">triggerEffects</code> 直接循环</td><td><code class="inline">notify + batch/endBatch</code> 两段式（5.6 节）</td></tr>
+  </table>
+
+  <details class="quiz">
+    <summary>自测一下：官方 3.5 精读</summary>
+    <div class="quiz-body">
+      <p>1. prepareDeps 为什么把 link.version 置 -1，而不是直接删掉旧登记？<br>
+         2. globalVersion 和 dep.version 各管什么？为什么 computed 能靠它「秒回」？</p>
+      <div class="ans">
+        <b>答案：</b><br>
+        1. -1 是「待观察」标记：本轮 fn 如果又读到了同一属性，track 发现 version=-1 的旧线直接复用
+        （不新建对象、不重新挂链）；跑完仍是 -1 的线才是真过期，cleanupDeps 统一摘除。
+        「先挂起，再清算」让未变化的轮次零分配。<br>
+        2. globalVersion 是<b>全局</b>账本：任何一次写入都 +1，供 computed 粗查「世界变过了吗」——
+        没变过连逐条对账都免了；dep.version 只在<b>对应属性</b>被写时 +1，供 isDirty 精确对账。
+        粗查挡住 99% 的空转，精查保证正确性。
+      </div>
+    </div>
+  </details>
+
+  <button class="read-btn" data-page="linkedlist">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#collections"><span class="dir">上一章</span><span class="t">← Set/Map 拦截器</span></a>
+    <a class="next" href="renderer.html#renderer"><span class="dir">下一章</span><span class="t">渲染器：分层的艺术 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+</body>
+</html>

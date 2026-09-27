@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-vue3 源码学习 · 把 mini-vue3 写完</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ================= 顶部导航 ================= -->
+<header class="topbar">
+  <button id="menuBtn" title="目录">☰</button>
+  <a class="logo" href="index.html#home">
+    <span class="logo-mark">V3</span>
+    mini-vue3 · 源码学习之旅
+  </a>
+  <nav id="topNav">
+    <a href="index.html#home" data-nav="home">首页</a>
+    <a href="index.html#overview" data-nav="overview">教程</a>
+    <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+</header>
+
+<div id="mask"></div>
+
+<aside class="sidebar" id="sidebar"></aside>
+
+<!-- ================= 主内容 ================= -->
+<main class="main">
+
+<!-- ============ 44 build1 ============ -->
+<section class="page" id="page-build1">
+  <div class="kicker">第 44 章 · 把 mini-vue3 写完</div>
+  <h1>写完①：渲染器主体</h1>
+  <p class="lead">
+    五部曲开工。本章目标：把 patch / processElement / mountElement / patchChildren 抄进
+    <code class="inline">runtime-core/src/index.ts</code>，跑通 dist 里的计数器 ——
+    「点击按钮，数字变化」这七个字背后的完整机制，从今天起是你的代码。
+  </p>
+
+  <h2>44.1 施工图与验收标准</h2>
+  <pre class="code" data-title="验收测试（先写，看它红）"><code>// test/renderer.spec.ts
+import { h, createRenderer } from "../src/runtime-core";
+
+describe("renderer", () =&gt; {
+  it("mount 一个元素", () =&gt; {
+    const root = document.createElement("div");
+    const { render } = createRenderer(nodeOps);
+    render(h("div", { id: "a" }, "hello"), root);
+    expect(root.innerHTML).toBe('&lt;div id="a"&gt;hello&lt;/div&gt;');  // ⭐ 查 innerHTML
+  });
+
+  it("更新文本与属性", () =&gt; {
+    render(h("div", { id: "a" }, "new"), root);     // 换内容
+    expect(root.querySelector("#a").textContent).toBe("new");
+  });
+});</code></pre>
+  <div class="callout tip">
+    <span class="tag">💡 施工准备</span><br>
+    需要的原料全部现成：nodeOps / patchProp 在 <code class="inline">runtime-dom</code>（13 章），
+    createRenderer 骨架在 <code class="inline">runtime-core</code>（15 章 15.2 的完整实现可直接抄）。
+    本五部曲做的是「把教学实现连成能跑的整体」。
+  </div>
+
+  <h2>44.2 实现清单（按依赖顺序抄）</h2>
+  <table>
+    <tr><th>序</th><th>函数</th><th>要点（出处）</th></tr>
+    <tr><td>1</td><td><code class="inline">patch</code> 分流</td><td>isSameVNodeType 短路 + type 分流（15.3 / 25.1）</td></tr>
+    <tr><td>2</td><td><code class="inline">mountElement</code></td><td>创建 → 挂 props → 挂 children → insert（17.2）</td></tr>
+    <tr><td>3</td><td><code class="inline">patchElement</code></td><td>复用 el + 属性 diff + children diff（18.1）</td></tr>
+    <tr><td>4</td><td><code class="inline">patchChildren</code> 分诊</td><td>文本/数组/空 三三组合（18.2）</td></tr>
+    <tr><td>5</td><td><code class="inline">patchKeyedChildren</code></td><td>五步预处理 + LIS（18.3，实验室同款算法）</td></tr>
+    <tr><td>6</td><td><code class="inline">unmount</code></td><td>先深后浅 + 锚点（17.4）</td></tr>
+  </table>
+  <p>
+    顺序即依赖：2 依赖 1，3 依赖 2…… 从上往下抄，每抄完一个跑一次测试 —— 红绿循环（43 章）。
+  </p>
+
+  <h2>44.3 常见坑（都是踩过的）</h2>
+  <table>
+    <tr><th>坑</th><th>症状</th><th>根因</th></tr>
+    <tr><td>忘写 <code class="inline">vnode.el = oldVNode.el</code></td><td>更新后页面出现两个元素</td><td>没复用 DOM，patch 走成了重新挂载</td></tr>
+    <tr><td>insert 的 anchor 传 undefined</td><td>节点全部插到容器末尾</td><td>anchor 语义没接住 —— 默认 null = append（17 章）</td></tr>
+    <tr><td>卸载时没递归 children</td><td>内存泄漏、detached DOM 堆积</td><td>17.4 的「先深后浅」没实现完整</td></tr>
+  </table>
+
+  <details class="quiz">
+    <summary>自测：验收通过的标准是什么？</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>答案：</b>dist/index.html 的计数器：初始上屏、点击 +1 视图更新、中途切 v-if 分支不报错、
+      列表随机打乱后内容与 key 对应 —— 四条全绿，渲染器主体毕业，进入第 45 章。
+    </div></div>
+  </details>
+
+  <button class="read-btn" data-page="build1">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="ecosystem.html#testing"><span class="dir">上一章</span><span class="t">← 用测试读源码</span></a>
+    <a class="next" href="#build2"><span class="dir">下一章</span><span class="t">写完② Text / Fragment →</span></a>
+  </div>
+</section>
+
+<!-- ============ 45 build2 ============ -->
+<section class="page" id="page-build2">
+  <div class="kicker">第 45 章 · 把 mini-vue3 写完</div>
+  <h1>写完②：Text / Fragment / 静态节点</h1>
+  <p class="lead">
+    上一章的渲染器只认元素。本章把 vnode 族的其余成员（25 章）补进实现 —— 做完它，多根模板、
+    纯文本插值、静态提升才能工作。
+  </p>
+
+  <h2>45.1 processText / processComment</h2>
+  <pre class="code" data-title="Text（25.2 的教学版直接可用）"><code>function processText(n1, n2, container, anchor) {
+  if (n1 == null) {
+    n2.el = hostCreateText(n2.children);
+    hostInsert(n2.el, container, anchor);
+  } else {
+    const el = (n2.el = n1.el);
+    if (n2.children !== n1.children) hostSetText(el, n2.children);
+  }
+}</code></pre>
+  <h2>45.2 processFragment：双锚点</h2>
+  <pre class="code" data-title="Fragment（25.3）"><code>function processFragment(n1, n2, container, anchor) {
+  const fragmentStartAnchor = (n2.el = hostCreateText(""));
+  const fragmentEndAnchor = (n2.anchor = hostCreateText(""));
+  if (n1 == null) {
+    hostInsert(fragmentStartAnchor, container, anchor);
+    hostInsert(fragmentEndAnchor, container, anchor);
+    mountChildren(n2.children, container, fragmentEndAnchor);
+  } else {
+    patchChildren(n1, n2, container, fragmentEndAnchor);
+  }
+}
+// 卸载：unmountFragment 从 startAnchor 沿 nextSibling 删到 endAnchor</code></pre>
+  <h2>45.3 静态节点：免检通道</h2>
+  <p>
+    patch 开头加 25.4 的分支：<code class="inline">patchFlag === HOISTED</code> 时把
+    <code class="inline">n2.el = n1.el</code> 直接返回。静态 vnode 的挂载用一次性
+    <code class="inline">hostSetElementText</code> 灌 innerHTML 即可。
+  </p>
+  <div class="callout warn">
+    <span class="tag">⚠️ Fragment 的 anchor 传参陷阱</span><br>
+    mountChildren 的 anchor 必须是 fragmentEndAnchor（不是父级 anchor）——
+    否则并发多个 Fragment 时子元素会插串行。锚点的意义在这一刻才真正体现。
+  </div>
+
+  <details class="quiz">
+    <summary>自测：本章验收</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>答案：</b>三段测试全绿即通过：① 纯文本插值更新；② 双根组件正常挂卸载；
+      ③ 含 Fragment 的列表打乱后 key 对应关系正确。
+    </div></div>
+  </details>
+
+  <button class="read-btn" data-page="build2">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#build1"><span class="dir">上一章</span><span class="t">← 写完① 渲染器主体</span></a>
+    <a class="next" href="#build3"><span class="dir">下一章</span><span class="t">写完③ 指令与 Transition →</span></a>
+  </div>
+</section>
+
+<!-- ============ 46 build3 ============ -->
+<section class="page" id="page-build3">
+  <div class="kicker">第 46 章 · 把 mini-vue3 写完</div>
+  <h1>写完③：指令与 Transition</h1>
+  <p class="lead">
+    把第 26 章（指令七钩子）和第 27 章（Transition 时间线）落进代码。做完这章，
+    v-model、v-show、自定义指令、进出场动画全部点亮。
+  </p>
+
+  <h2>46.1 withDirectives + 四个触发点</h2>
+  <pre class="code" data-title="挂载/更新/卸载三处的接线（26.3）"><code>// mountElement 内：
+if (dirs) invokeDirectiveHook(n2, null, parentComponent, "beforeMount");
+// ... 属性/子节点上屏 ...
+if (dirs) queuePostRenderEffect(() =&gt; dirs.forEach(d =&gt; d.dir.mounted?.(el, d, ...)));
+
+// patchElement 内：
+if (dirs) invokeDirectiveHook(n2, n1, parentComponent, "beforeUpdate");
+// ... patch ...
+if (dirs) queuePostRenderEffect(() =&gt; dirs.forEach(d =&gt; d.dir.updated?.(...)));
+
+// unmount 内：
+if (dirs) invokeDirectiveHook(vnode, null, parentComponent, "beforeUnmount");
+queuePostRenderEffect(() =&gt; dirs.forEach(d =&gt; d.dir.unmounted?.(...)));</code></pre>
+  <h2>46.2 内置三指令：v-show / v-html / v-model(文本)</h2>
+  <pre class="code" data-title="顺手把内置指令也实现了（23.5 的代码直接用）"><code>export const vShow = {
+  beforeMount(el, { value }) { el._vod = el.style.display = value ? "" : "none"; },
+  updated(el, { value, oldValue }) {
+    if (!value === !oldValue) return;
+    el.style.display = value ? el._vod || "" : "none";
+  },
+};
+export const vModelText = {
+  created(el, { modifiers }, vnode) {
+    el.addEventListener(modifiers.lazy ? "change" : "input", () =&gt; {
+      let v = el.value; if (modifiers.trim) v = v.trim();
+      if (modifiers.number) v = looseToNumber(v);
+      getModelAssigner(vnode)(v);            // → emit update:modelValue
+    });
+  },
+  beforeUpdate(el, { value, oldValue }) {
+    el._assign = getModelAssigner(vnode);
+    if (document.activeElement === el &amp;&amp; value === oldValue) return;  // 输入中不覆盖
+    el.value = value;
+  },
+};</code></pre>
+  <h2>46.3 Transition 的最简实现</h2>
+  <p>
+    按第 27 章的时刻表实现 enter/leave：加 from+active → 下一帧删 from → 监听
+    transitionend（超时兜底）→ 收尾。约 60 行；卸载改为「缓刑到动画结束」（24.3）。
+    细节全在 27 章，照抄即可。
+  </p>
+
+  <details class="quiz">
+    <summary>自测：本章验收</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>答案：</b>① 自定义 v-focus 挂载即聚焦；② v-model 输入框双向同步且 trim/number 生效；
+      ③ v-show 切换保留元素；④ 配好 CSS 的 Transition 有进出动画。四条全绿毕业。
+    </div></div>
+  </details>
+
+  <button class="read-btn" data-page="build3">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#build2"><span class="dir">上一章</span><span class="t">← 写完② Text / Fragment</span></a>
+    <a class="next" href="#build4"><span class="dir">下一章</span><span class="t">写完④ 调度器与三大件 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 47 build4 ============ -->
+<section class="page" id="page-build4">
+  <div class="kicker">第 47 章 · 把 mini-vue3 写完</div>
+  <h1>写完④：调度器与组件三大件</h1>
+  <p class="lead">
+    全系列的高潮：把第 23 章（调度器）和第 22 章（三大件）接进渲染器。
+    做完这章，你的 mini-vue3 能跑真正的组件树 —— 状态组件、父子通信、批量更新一样不缺。
+  </p>
+
+  <h2>47.1 生产级调度器（23 章源码直接抄）</h2>
+  <pre class="code" data-title="scheduler.ts（含排序 + pre/post 队列 + nextTick）"><code>const queue = []; let flushIndex = 0, currentFlushId = 0, isFlushing = false, isFlushPending = false;
+const pendingPostFlushCbs = []; let currentFlushPromise = null;
+const resolvedPromise = Promise.resolve();
+
+export function queueJob(job) {
+  if (!queue.includes(job, flushIndex) &amp;&amp; (!job.id || job.id &gt; currentFlushId)) queue.push(job);
+  queueFlush();
+}
+export function nextTick(fn) { return (currentFlushPromise || resolvedPromise).then(fn); }
+
+function queueFlush() {
+  if (!isFlushing &amp;&amp; !isFlushPending) {
+    isFlushPending = true;
+    currentFlushPromise = resolvedPromise.then(flushJobs);
+  }
+}
+function flushJobs(seen) {
+  isFlushPending = isFlushing = true;
+  try {
+    while (queue.length) {
+      queue.sort((a, b) =&gt; getId(a) - getId(b));      // 父先子后
+      flushPreFlushCbs(seen);                          // beforeUpdate / watch pre
+      const job = queue.shift(); job();                // 组件 update → render → patch
+      currentFlushId = getId(job); flushIndex++;
+    }
+    flushPostFlushCbs(seen);                           // mounted / updated / ref 赋值
+  } finally {
+    isFlushing = false; flushIndex = 0; currentFlushId = 0;
+    if (queue.length || pendingPostFlushCbs.length) flushJobs(seen);  // 100 层保护
+  }
+}</code></pre>
+
+  <h2>47.2 组件三大件接线（22 章施工图）</h2>
+  <table>
+    <tr><th>模块</th><th>接入点</th></tr>
+    <tr><td>initProps（props/attrs 分家，shallowReactive）</td><td>mountComponent 开头</td></tr>
+    <tr><td>initSlots（槽函数袋）</td><td>initProps 之后、setup 之前</td></tr>
+    <tr><td>createEmit（事件名两次变换）</td><td>挂到 instance.emit + setupContext</td></tr>
+    <tr><td>setupRenderEffect</td><td>instance.update = effect(update, { scheduler: queueJob })</td></tr>
+    <tr><td>updateComponent</td><td>shouldUpdateComponent 审查（19.7）→ next → update()</td></tr>
+    <tr><td>instance.uid</td><td>job.id = instance.uid —— 排序的燃料</td></tr>
+  </table>
+
+  <h2>47.3 验收：一口气跑通四连</h2>
+  <p>父传子 props（子不更新时审查拦截）→ 子 emit 事件回父 → 父状态批量修改只渲染一次 →
+  nextTick 读到新 DOM。四条链全通 = 第 2~23 章的机制全部在你的代码里闭环。</p>
+
+  <details class="quiz">
+    <summary>自测：调试卡住时的三问</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>答案：</b>① job 有没有被入队？（在 queueJob 打断点）② flush 有没有跑？顺序对吗？
+      （打 log 看 id 排序）③ update 里 render 抛错了吗？（第 35 章的错误包装会吞信息，dev 阶段先裸抛）。
+    </div></div>
+  </details>
+
+  <button class="read-btn" data-page="build4">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#build3"><span class="dir">上一章</span><span class="t">← 写完③ 指令与 Transition</span></a>
+    <a class="next" href="#build5"><span class="dir">下一章</span><span class="t">写完⑤ 集合拦截器与收官 →</span></a>
+  </div>
+</section>
+
+<!-- ============ 48 build5 ============ -->
+<section class="page" id="page-build5">
+  <div class="kicker">第 48 章 · 把 mini-vue3 写完</div>
+  <h1>写完⑤：集合拦截器与收官</h1>
+  <p class="lead">
+    最后一块拼图：把第 13 章的 collectionHandlers 接进 baseHandler。
+    做完它，你的 mini-vue3 与官方 reactivity 完全同构 —— 朝圣之路正式打通。
+  </p>
+
+  <h2>48.1 接线清单</h2>
+  <table>
+    <tr><th>步</th><th>内容</th><th>出处</th></tr>
+    <tr><td>1</td><td>createInstrumentations（读 7 写 11 个方法）</td><td>13.2 的完整实现</td></tr>
+    <tr><td>2</td><td>isCollection 判定 + get 开头的集合分支</td><td>13.3</td></tr>
+    <tr><td>3</td><td>ITERATE_KEY 哨兵常量</td><td>5.5</td></tr>
+    <tr><td>4</td><td>size 的 accessor 特殊处理</td><td>13.4</td></tr>
+    <tr><td>5</td><td>浅层版 shallowCollectionHandlers（只读不深入）</td><td>3.6 工厂思想</td></tr>
+  </table>
+
+  <h2>48.2 最终验收：全家福测试</h2>
+  <pre class="code" data-title="final.spec.ts —— 五部曲全部成果的集大成"><code>describe("mini-vue3 全家福", () =&gt; {
+  it("响应式：对象 + 数组 + Map/Set 全部联动", () =&gt; { ... });
+  it("computed 缓存 + 链式依赖", () =&gt; { ... });
+  it("watch 多源 + 清理 + 停止", () =&gt; { ... });
+  it("组件树：父子 props/emit + KeepAlive 缓存", () =&gt; { ... });
+  it("调度器：批处理 + nextTick 顺序", () =&gt; { ... });
+  it("diff：乱序列表移动次数最少", () =&gt; { ... });
+});</code></pre>
+  <div class="callout deep">
+    <span class="tag">🎓 毕业致辞</span><br>
+    从一个 isObject 到集合拦截器，你的 mini-vue3 已经覆盖官方 reactivity + runtime 的主干。
+    现在打开 <code class="inline">vuejs/core</code>，从 <code class="inline">packages/reactivity/__tests__</code>
+    开始读（43 章的方法），你会发现每个测试都在说「你写过的东西」——
+    <b>先爬小山，再登珠峰；山还在，但你已经会爬山了。</b>
+  </div>
+
+  <details class="quiz">
+    <summary>自测：毕业答辩三连</summary>
+    <div class="quiz-body"><div class="ans">
+      <b>答案：</b>① 从 count++ 到像素，讲完整条链（quiz 19 章压轴题的口述版）；
+      ② 说出三处「编译反哺运行时」的具体代码位置（15.3 / 15.7 / 20 章）；
+      ③ 指出 mini 版与官方的三点差距及原因（链表版 14 章、集合全覆盖 13 章、Block 收集 20 章）。
+    </div></div>
+  </details>
+
+  <button class="read-btn" data-page="build5">✓ 标记本章已读</button>
+  <div class="pager">
+    <a class="prev" href="#build4"><span class="dir">上一章</span><span class="t">← 写完④ 调度器与三大件</span></a>
+    <a class="next" href="masters.html#perf"><span class="dir">下一章</span><span class="t">性能优化：源码视角 →</span></a>
+  </div>
+</section>
+
+</main>
+<script src="assets/chapters.js?v=1"></script>
+<script src="assets/site.js?v=1"></script>
+</body>
+</html>
