@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 编译器篇</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -55,6 +55,10 @@
       <span class="fbox blue">generate<br><small>→ render 函数代码</small></span>
     </div>
     <div class="cap">和任何编译器（Babel、TypeScript、GCC）同构：词法/语法分析 → 转换 → 代码生成</div>
+  </div>
+
+  <div class="illust" data-art="compiler-translator">
+    <div class="ill-cap">翻译流水线：模板进门，render 函数出门，三大优化是附赠的加速包</div>
   </div>
 
   <h2>30.2 一段模板的「前后对照」</h2>
@@ -294,6 +298,10 @@ p[data-v-7ba5bd90] { color: red; }
     <tr><td><code class="inline">DirectiveNode</code></td><td>v-if / v-on 等指令</td><td>transform 阶段消化掉（第 32 章）</td></tr>
   </table>
 
+  <div class="illust" data-art="ast-machine">
+    <div class="ill-cap">状态机流水线：逐字符吞模板，边解析边纠错边埋线</div>
+  </div>
+
   <h2>31.2 为什么是状态机，而不是正则一把梭</h2>
   <p>
     官方 parser 的核心是一张 <b>25 个状态的状态机</b>（DATA、TagOpen、TagName、BeforeAttrName……）。
@@ -478,6 +486,10 @@ function parseChildren(...) {
     <b>子树处理完</b>（children 的 patchFlag、静态提升都定了）才能包装 —— exit 就是干这个的。
     同时 transform 顺序有讲究：<b>vFor 必须在 vIf 之前</b>（同一元素上 v-for 先于 v-if 语义），
     编译器靠数组顺序硬约束这一点。
+  </div>
+
+  <div class="illust" data-art="transform-onion">
+    <div class="ill-cap">洋葱模型：enter 进去、exit 出来 —— v-if 在出口完成变身</div>
   </div>
 
   <h2>32.2 一场 v-if 的完整变身</h2>
@@ -678,6 +690,10 @@ _createBlock(_Fragment, { key: item.id },
     <tr><td><code class="inline">genIf</code> / <code class="inline">genFor</code></td><td>结构指令产物</td><td>三元表达式 / 带缓存的 createFor</td></tr>
     <tr><td><code class="inline">genHoisted</code></td><td>静态提升节点</td><td>render 外的 <code class="inline">const _hoisted_x = ...</code></td></tr>
   </table>
+
+  <div class="illust" data-art="codegen-two-printers">
+    <div class="ill-cap">同一棵 AST 两台打印机：render 出 vnode，ssrRender 出字符串</div>
+  </div>
 
   <h2>33.3 同一棵 AST 的两种产物</h2>
   <p>
@@ -931,8 +947,10 @@ setup(__props, { expose }) {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 <script src="assets/labs/common.js?v=1"></script>
 <script src="assets/labs/compiler.js?v=1"></script>
 </body>

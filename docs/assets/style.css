@@ -538,6 +538,165 @@ details.quiz .ans b { color: var(--green-d); }
 }
 #mountPreview button:active { transform: scale(.95); }
 
+/* ============================================================
+   v2 新增：章首插图横幅 / 概念插图 / 本章小结 / 结业彩蛋
+   ============================================================ */
+
+/* ---------- 章首插图横幅 ---------- */
+.ch-hero {
+  display: flex; align-items: center; gap: 20px;
+  border-radius: 16px; padding: 18px 22px; margin: 4px 0 30px;
+  border: 1.5px solid var(--border); position: relative; overflow: hidden;
+  background:
+    radial-gradient(ellipse 60% 90% at 88% 8%, rgba(66,211,146,.14), transparent 60%),
+    radial-gradient(ellipse 50% 80% at 8% 100%, rgba(100,126,255,.10), transparent 60%),
+    linear-gradient(120deg, #fbfdfc, #f5f9f7 55%, #f4f7fd);
+}
+.ch-hero.a-blue  { background:
+    radial-gradient(ellipse 60% 90% at 88% 8%, rgba(14,124,194,.13), transparent 60%),
+    radial-gradient(ellipse 50% 80% at 8% 100%, rgba(66,211,146,.10), transparent 60%),
+    linear-gradient(120deg, #fafcfe, #f3f8fc 55%, #f2f6fd); }
+.ch-hero.a-amber { background:
+    radial-gradient(ellipse 60% 90% at 88% 8%, rgba(176,133,31,.13), transparent 60%),
+    radial-gradient(ellipse 50% 80% at 8% 100%, rgba(66,211,146,.10), transparent 60%),
+    linear-gradient(120deg, #fdfcf7, #faf7ec 55%, #f5f7fd); }
+.ch-hero.a-rose  { background:
+    radial-gradient(ellipse 60% 90% at 88% 8%, rgba(190,52,85,.12), transparent 60%),
+    radial-gradient(ellipse 50% 80% at 8% 100%, rgba(100,126,255,.10), transparent 60%),
+    linear-gradient(120deg, #fefafb, #fcf3f5 55%, #f4f6fd); }
+.ch-hero.a-purple{ background:
+    radial-gradient(ellipse 60% 90% at 88% 8%, rgba(124,107,214,.14), transparent 60%),
+    radial-gradient(ellipse 50% 80% at 8% 100%, rgba(66,211,146,.10), transparent 60%),
+    linear-gradient(120deg, #fbfaff, #f6f4fc 55%, #f2f8fd); }
+.ch-hero .ch-art { flex: 0 0 auto; width: 168px; }
+.ch-hero .ch-art svg { width: 100%; height: auto; display: block; }
+.ch-hero .ch-txt { flex: 1; min-width: 0; }
+.ch-hero .ch-no {
+  display: inline-block; font-family: var(--mono); font-size: 12px; font-weight: 800;
+  color: var(--green-d); background: var(--green-bg); border: 1px solid #bfe5d2;
+  border-radius: 999px; padding: 2px 11px; letter-spacing: .06em; margin-bottom: 7px;
+}
+.ch-hero.a-blue .ch-no  { color: var(--blue); background: var(--blue-bg); border-color: #c8e2f5; }
+.ch-hero.a-amber .ch-no { color: var(--amber); background: var(--amber-bg); border-color: #f0e3bc; }
+.ch-hero.a-rose .ch-no  { color: var(--rose); background: var(--rose-bg); border-color: #f2cdd8; }
+.ch-hero.a-purple .ch-no{ color: #5f4fd0; background: #efecfb; border-color: #d9d2f2; }
+.ch-hero .ch-title { font-size: 20px; font-weight: 800; color: var(--text); line-height: 1.35; }
+.ch-hero .ch-cap {
+  margin-top: 5px; font-size: 14.5px; color: var(--dim); line-height: 1.65;
+}
+.ch-hero .ch-meta {
+  margin-top: 9px; font-size: 12.5px; color: #8b949e;
+  display: flex; flex-wrap: wrap; gap: 5px 14px;
+}
+.ch-hero .ch-meta b { color: var(--green-d); font-weight: 700; }
+.ch-hero .mascot-bob { animation: bob 3.2s ease-in-out infinite; transform-origin: 50% 90%; }
+@keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+@media (max-width: 700px) {
+  .ch-hero { flex-direction: column; text-align: center; padding: 16px; }
+  .ch-hero .ch-art { width: 128px; }
+  .ch-hero .ch-meta { justify-content: center; }
+}
+
+/* 首页吉祥物 */
+.home-mascot { width: 128px; margin: 0 auto 6px; animation: bob 3.2s ease-in-out infinite; }
+.home-mascot svg { width: 100%; height: auto; display: block; }
+
+/* ---------- 嵌入式概念插图 ---------- */
+.illust {
+  margin: 24px auto 26px; max-width: 620px;
+  background: linear-gradient(160deg, #fdfefe, #f6faf8 60%, #f4f7fd);
+  border: 1.5px solid var(--border); border-radius: 16px;
+  padding: 14px 10px 6px; box-shadow: 0 3px 14px rgba(30,60,45,.06);
+}
+.illust svg { width: 100%; height: auto; display: block; }
+.illust .ill-cap {
+  text-align: center; font-size: 13px; color: var(--dim); font-style: italic;
+  padding: 8px 14px 8px; margin: 0;
+}
+@media (max-width: 700px) { .illust { max-width: 100%; } }
+
+/* ---------- 本章小结卡片 ---------- */
+.summary-card {
+  margin: 40px 0 8px; border-radius: 14px; overflow: hidden;
+  border: 1.5px solid #c8e8d9; background: linear-gradient(180deg, #f2fbf7, #ffffff 90%);
+}
+.summary-card .sum-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 12px 18px; font-weight: 800; font-size: 15.5px; color: #1f6f4e;
+  background: linear-gradient(90deg, rgba(59,167,118,.14), rgba(59,167,118,.03));
+  border-bottom: 1px solid #d7eee2;
+}
+.summary-card .sum-head .sum-ico {
+  width: 26px; height: 26px; border-radius: 8px; flex: 0 0 auto;
+  background: linear-gradient(135deg, #42d392, #3ba776);
+  display: flex; align-items: center; justify-content: center; font-size: 14px; color: #fff;
+}
+.summary-card .sum-body { padding: 14px 20px 16px; }
+.summary-card .sum-take {
+  font-size: 16.5px; font-weight: 700; color: #1f2328; line-height: 1.7;
+  background: #fff; border: 1.5px dashed #a9dfc5; border-radius: 10px;
+  padding: 10px 16px; margin: 0 0 12px;
+}
+.summary-card .sum-take::before { content: "🔑 一句话带走："; color: var(--green-d); font-size: 13.5px; font-weight: 800; }
+.summary-card ul { margin: 0; padding-left: 4px; list-style: none; }
+.summary-card li {
+  position: relative; padding-left: 26px; margin-bottom: 8px;
+  font-size: 15px; line-height: 1.7; color: #3a424b;
+}
+.summary-card li::before {
+  content: "✅"; position: absolute; left: 0; top: 0; font-size: 13px;
+}
+.summary-card li b { color: #1f2328; }
+.summary-card code.inline { font-size: 82%; }
+
+/* ---------- 已读按钮点击的小彩带 ---------- */
+.read-btn { position: relative; }
+.spark {
+  position: absolute; pointer-events: none; font-size: 16px;
+  animation: sparkUp .9s ease-out forwards; z-index: 5;
+}
+@keyframes sparkUp {
+  0%   { opacity: 1; transform: translate(0, 0) scale(.6) rotate(0deg); }
+  100% { opacity: 0; transform: translate(var(--sx), -52px) scale(1.25) rotate(var(--sr)); }
+}
+
+/* ---------- 结业彩蛋 ---------- */
+#party {
+  position: fixed; inset: 0; z-index: 200; display: none;
+  align-items: center; justify-content: center; background: rgba(15,23,32,.45);
+  backdrop-filter: blur(4px);
+}
+#party.on { display: flex; }
+.party-card {
+  position: relative; width: min(480px, 92vw);
+  background: #fff; border-radius: 22px; padding: 34px 30px 28px;
+  text-align: center; box-shadow: 0 24px 70px rgba(0,0,0,.35);
+  border: 2px solid #bfe5d2; animation: popIn .45s cubic-bezier(.2,1.4,.4,1);
+}
+@keyframes popIn { from { opacity: 0; transform: scale(.7) translateY(30px); } to { opacity: 1; transform: none; } }
+.party-card .p-mascot { width: 150px; margin: 0 auto 6px; }
+.party-card .p-mascot svg { width: 100%; height: auto; }
+.party-card h2 {
+  margin: 4px 0 8px; font-size: 26px;
+  background: linear-gradient(120deg, #1f6f4e, #3ba776 55%, #647eff);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.party-card p { color: var(--dim); font-size: 15px; line-height: 1.75; margin: 0 0 18px; }
+.party-btn {
+  background: linear-gradient(90deg, #42d392, #3ba776); color: #fff; border: none;
+  border-radius: 10px; padding: 11px 30px; font-size: 15.5px; font-weight: 700; cursor: pointer;
+  font-family: var(--sans); box-shadow: 0 4px 14px rgba(59,167,118,.35);
+}
+.party-btn:hover { transform: translateY(-1px); }
+.confetti {
+  position: fixed; top: -32px; z-index: 210; pointer-events: none; font-size: 18px;
+  animation: confFall var(--cd, 3s) linear forwards;
+}
+@keyframes confFall {
+  0%   { transform: translateY(0) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(108vh) rotate(var(--cr, 540deg)); opacity: .6; }
+}
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 960px) {
   .sidebar { transform: translateX(-100%); transition: transform .25s; box-shadow: 4px 0 20px rgba(0,0,0,.08); }

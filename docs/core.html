@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 组件与调度篇</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -114,6 +114,10 @@
     根组件、子组件、元素、文本 —— 在 patch 眼里一视同仁，全是节点。统一数据结构，
     才有统一的 patch / diff / 组件复用逻辑。
   </p>
+
+  <div class="illust" data-art="startflow-rocket">
+    <div class="ill-cap">发射倒计时：createApp 备货 → mount 点火 → patch 上屏</div>
+  </div>
 
   <h2>21.3 🧪 启动流程实验室：亲手点亮调用链</h2>
   <p>
@@ -306,6 +310,10 @@ provide(key, value) { (this._context.provides)[key] = value; return this; },  //
     <tr><td><code class="inline">subTree / update / isMounted</code></td><td>渲染子树 / 更新 effect / 挂载标记</td><td>第 19 章</td></tr>
     <tr><td><code class="inline">bm / m / bu / u ...</code></td><td>生命周期钩子数组（beforeMount/mounted/...）</td><td>第 19/23 章</td></tr>
   </table>
+
+  <div class="illust" data-art="compdata-desk">
+    <div class="ill-cap">组件桌面四件套：props 合同、attrs 边角料、emit 收据、slots 函数袋</div>
+  </div>
 
   <h2>22.2 initProps：props 与 attrs 的「分家」</h2>
   <p>
@@ -605,6 +613,10 @@ function setRef(rawRef, oldRawRef, parentVNode, vnode) {
     <b>②有些事必须赶在渲染前 / 渲染后做</b>（beforeUpdate / updated / watch 的 pre/post）；
     <b>③用户要能「在更新完成后插一脚」</b>（nextTick）。
   </p>
+
+  <div class="illust" data-art="scheduler-queue">
+    <div class="ill-cap">取号大厅：同帧任务合并成一趟 flush，nextTick 坐散场班车</div>
+  </div>
 
   <h2>23.2 queueJob：旗标去重 + 有序插入</h2>
   <pre class="code" data-title="queueJob（scheduler.ts，3.5 原文级简化）"><code>const queue = [];              // ⭐ 主队列（数组，因为要保持有序）
@@ -997,6 +1009,10 @@ export function inject(key, defaultValue) {
     这样注入值为 <code class="inline">undefined</code> 和「未注入」才得以区分。
   </div>
 
+  <div class="illust" data-art="pin-familytree">
+    <div class="ill-cap">provide/inject = 原型链找爷爷：自己没有，就一路问上去</div>
+  </div>
+
   <h2>24.2 defineAsyncComponent：一个状态机包装器</h2>
   <pre class="code" data-title="apiAsyncComponent.ts（教学版）"><code>export function defineAsyncComponent(source) {
   // 真身是 defineComponent 包出来的包装组件；__asyncLoader 字段存的是「加载函数」本身
@@ -1209,8 +1225,10 @@ queuePostRenderEffect(() =&gt; { suspense.isInFallback = false; /* 切换显示 
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 <script src="assets/labs/common.js?v=1"></script>
 <script src="assets/labs/core.js?v=1"></script>
 </body>

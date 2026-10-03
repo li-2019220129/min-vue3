@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 高手篇</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -86,6 +86,10 @@
       <td>v-if 动结构 → 开新 Block 走慢路径 + 组件重建（第 30 章）；v-show 只改 style</td>
     </tr>
   </table>
+
+  <div class="illust" data-art="perf-boost">
+    <div class="ill-cap">性能八招 = 火箭助推器：识别不变量，跳过它</div>
+  </div>
 
   <h2>49.2 招式详解：v-memo —— 手动挡的缓存</h2>
   <pre class="code" data-title="v-memo 的原理与用法"><code>&lt;!-- 依赖数组 [item.id, item.selected] 不变 → 整个 &lt;li&gt; 的 vnode 直接复用，diff 跳过 --&gt;
@@ -224,6 +228,10 @@ const Row = {
     24 道真题按「基础 → 进阶 → 高手」分级。建议做法：先只看问题，
     口头作答，再展开对照要点 —— 答不上的那道，就回去翻对应章节。
   </p>
+
+  <div class="illust" data-art="interview-whiteboard">
+    <div class="ill-cap">高分答题三连：先结论 → 再原理 → 最后画图</div>
+  </div>
 
   <h2>🟢 基础篇（答不出建议回炉）</h2>
   <details class="quiz">
@@ -418,7 +426,9 @@ const Row = {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 </body>
 </html>

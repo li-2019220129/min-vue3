@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 响应式源码精读</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -56,6 +56,10 @@
     Proxy 的拦截 Trap 是按「语法动作」划分的：<code class="inline">map.set(...)</code> 在语法上只有一次
     <b>属性读取</b>（读 set 成员）+ 一次函数调用。函数调用本身不在 Proxy 的管辖范围 ——
     所以唯一的机会是 get：返回一个「我们改写过的 set 方法」，调用方的代码一行没变，行为已经被换走了。
+  </div>
+
+  <div class="illust" data-art="collections-bento">
+    <div class="ill-cap">两套便当：普通对象拦属性，Set/Map 把 track/trigger 埋进方法体</div>
   </div>
 
   <h2>13.2 instrumentations：把 track/trigger 埋进方法体</h2>
@@ -186,6 +190,10 @@ export class Link {
       <span class="fbox gray">Link#3(computed) = 链头</span>
     </div>
     <div class="cap">一条 dep 挂一串 Link（新订阅的接到尾部）；每个 Link 同时挂在 effect 侧的另一条双向链上（nextDep/prevDep）</div>
+  </div>
+
+  <div class="illust" data-art="linkedlist-hands">
+    <div class="ill-cap">dep 与 sub 的每一次相遇，都记成一节双向链 —— 摘除只需 O(1)</div>
   </div>
 
   <h2>14.2 Dep.track()：登记线的完整生命</h2>
@@ -354,7 +362,9 @@ function isDirty(sub) {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 </body>
 </html>

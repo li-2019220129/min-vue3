@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 边界与生态</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -119,6 +119,10 @@ export function callWithAsyncErrorHandling(fn, instance, type, args) {
     <tr><td><code class="inline">DIRECTIVE_HOOKED / APP_UNMOUNT_FN</code></td><td>指令钩子（第 26 章）/ unmount</td></tr>
     <tr><td><code class="inline">SCHEDULER</code></td><td>flushJobs 里 job 执行（第 23 章的 try/finally！）</td></tr>
   </table>
+
+  <div class="illust" data-art="error-glove">
+    <div class="ill-cap">接球演练：孙组件抛错，父链上的手套一层层接</div>
+  </div>
 
   <h2>35.3 🧪 错误传播实验室</h2>
   <p>
@@ -290,6 +294,10 @@ renderToString(app, (ctx) =&gt; {
     跳过 vnode 创建直接拼字符串 —— 所以服务端开销远低于客户端渲染。
   </div>
 
+  <div class="illust" data-art="ssr-wires">
+    <div class="ill-cap">hydration = 只接电线不重建：房子是服务器盖的，家电客户端来装</div>
+  </div>
+
   <h2>36.2 客户端：hydration 是「激活」而不是重建</h2>
   <pre class="code" data-title="hydrate 的核心循环（hydration.ts 简化）"><code>function hydrate(vnode, container) {
   // ⭐ 与 createApp.mount 的唯一区别：不调 hostCreateElement，
@@ -444,6 +452,10 @@ renderToPipeableStream(app).pipe(res);
     <tr><td><code class="inline">patchProp(el, key, prev, next)</code></td><td>class/style/事件/attr 分流（第 15 章）</td><td>记进 props —— 因为是全量重绘，无需 diff 属性</td></tr>
     <tr><td><code class="inline">parentNode / nextSibling</code></td><td>DOM API</td><td>children 数组查找（Fragment 锚点靠它）</td></tr>
   </table>
+
+  <div class="illust" data-art="custom-canvas">
+    <div class="ill-cap">画布渲染器：换一套 nodeOps，全量重绘也优雅</div>
+  </div>
 
   <h2>37.2 画布渲染器：一次「全量重绘」策略</h2>
   <pre class="code" data-title="canvas nodeOps（教学完整版，~50 行）"><code>// 组件代码不用改！仍然 h('rect', { x: 10, y: 10, w: 80, h: 30, fill: 'green' })
@@ -608,8 +620,10 @@ function bubble(node, event, e) {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 <script src="assets/labs/common.js?v=1"></script>
 <script src="assets/labs/frontier.js?v=1"></script>
 </body>

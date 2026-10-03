@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习之旅 · 像读小说一样读懂 Vue3</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -114,8 +114,8 @@
 
   <div class="callout tip">
     <span class="tag">💡 怎么使用这个网站</span><br>
-    ① 按顺序读，每章 10~15 分钟；② 看到 <b>🧪 实验室</b> 一定要动手点；③ 每章结尾的「🎯 自测」值得停下来想一想；
-    ④ 读完一章点一下页面底部的「标记本章已读」，进度条会陪你走完全程。
+    ① 按顺序读，每章开头都有 V豆 插画横幅和预计用时；② 看到 <b>🧪 实验室</b> 一定要动手点；③ 每章结尾的「🎯 自测」值得停下来想一想；
+    ④ 每章末尾的「📮 本章小结」是复习神器：一句话带走 + 要点清单；⑤ 读完一章点一下「标记本章已读」撒个花，集齐 51 章有结业彩蛋 🎓。
   </div>
 
   <div class="pager">
@@ -177,6 +177,10 @@
     拆分不是为了炫技，是为了<b>跨平台</b>：runtime-core 只定义「渲染需要哪些操作」（插入节点、删节点、改属性……），
     具体怎么干交给下层。给浏览器就配 runtime-dom（真 DOM），给 canvas 可以配一个「画图版 runtime」，
     core 一行代码都不用改。这套「依赖倒置」的思想值得偷走。
+  </div>
+
+  <div class="illust" data-art="overview-tower">
+    <div class="ill-cap">四层小楼单向依赖：上层点菜，下层做菜 —— runtime-core 不认识 DOM 才能跨平台</div>
   </div>
 
   <h2>1.2 shared：小而美的起点</h2>
@@ -263,7 +267,7 @@ node scripts/dev.js runtime-dom -f esm</code></pre>
     回到对应文件把源码裸读一遍（不看书），能独立读懂才算过关。
   </div>
 
-  <h2>1.5 官方仓库速查表：vuejs/core 的目录地图</h2>
+  <h2>1.6 官方仓库速查表：vuejs/core 的目录地图</h2>
   <p>有了地图，去官方仓库就不会迷路。这张表是你以后翻 <code class="inline">vuejs/core</code> 时的导航：</p>
   <table>
     <tr><th>官方目录</th><th>规模与内容</th><th>本站对应章</th></tr>
@@ -274,7 +278,7 @@ node scripts/dev.js runtime-dom -f esm</code></pre>
     <tr><td><code class="inline">packages/server-renderer</code></td><td>renderToString 与 hydration 配套</td><td>第 36 章</td></tr>
   </table>
 
-  <h2>1.6 读源码的三把钥匙</h2>
+  <h2>1.7 读源码的三把钥匙</h2>
   <ol>
     <li><b>从测试用例读</b>：每个包的 <code class="inline">__tests__</code> 目录是「行为说明书」——
       先看测试断言什么，再回源码找实现，永远比硬啃实现快。</li>
@@ -313,7 +317,9 @@ node scripts/dev.js runtime-dom -f esm</code></pre>
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 </body>
 </html>

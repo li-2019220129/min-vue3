@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 渲染器篇</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -368,6 +368,10 @@ export default function patchEvent(el, name, nextValue) {
       <span class="fbox">最小 DOM 更新</span>
     </div>
     <div class="cap">昂贵操作（DOM）被「批量 + 最小化」了，便宜操作（比较对象）随便造 —— 这就是虚拟 DOM 的全部经济学</div>
+  </div>
+
+  <div class="illust" data-art="hvnode-photo">
+    <div class="ill-cap">VNode = 渲染快照：对比两张照片，只改不同的地方</div>
   </div>
 
   <h2>16.2 VNode 结构解剖</h2>
@@ -718,6 +722,10 @@ h("ul", null, [ h("li", { key: "a" }, "苹果"), h("li", { key: "b" }, "香蕉")
   </div>
 
   
+  <div class="illust" data-art="mount-moving">
+    <div class="ill-cap">搬家守则：先在内存装好子树，再一次性抬进门</div>
+  </div>
+
   <h2>17.4 mountElement 的顺序为什么这么讲究</h2>
   <p>官方 mountElement 的动作顺序是精心排过的，换一步都会出 bug —— 注意官方的顺序和 17.2
     教学版恰好相反：<b>先子节点、后属性</b>：</p>
@@ -994,6 +1002,10 @@ for (let j = toBePatched - 1; j &gt;= 0; j--) {
     若走「全删重建」要 5 卸 + 6 挂 = 11 次 DOM 操作，还丢光全部状态。省下的 9 次操作，就是这套算法的全部意义。
   </p>
 
+  <div class="illust" data-art="diff-express">
+    <div class="ill-cap">分拣中心现场：复用优先、LIS 指挥交通，最贵的移动留给最少的节点</div>
+  </div>
+
   <h2>18.4 🧪 分步推演实验室：亲手走一遍</h2>
   <p>
     纸上推演是「知道」，这里是「做到」—— <b>点一下走一步</b>，亲眼看三个指针（i / e1 / e2）怎么移动、
@@ -1244,6 +1256,10 @@ function setupRenderEffect(instance, container, anchor) {
       <span class="fbox">最小化更新 DOM</span>
     </div>
     <div class="cap">第 2 章的 effect + 第 18 章的 diff = 「数据驱动视图」的完整闭环</div>
+  </div>
+
+  <div class="illust" data-art="component-gearbox">
+    <div class="ill-cap">组件的心脏：render 包进 effect，数据一变 job 就排队重跑</div>
   </div>
 
   <h2>19.3 父组件更新，子组件怎么办？</h2>
@@ -1592,8 +1608,10 @@ if (currentBlock &amp;&amp; vnode.patchFlag &gt; 0) {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 <script src="assets/labs/common.js?v=1"></script>
 <script src="assets/labs/renderer.js?v=1"></script>
 </body>

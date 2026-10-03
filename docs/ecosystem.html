@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 生态与工程</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -48,6 +48,10 @@
     <tr><td><code class="inline">&lt;script setup&gt;</code></td><td>整页刷新（组件重建）</td><td>为什么这个不能热替换？setup 的响应式依赖关系变了</td></tr>
     <tr><td><code class="inline">&lt;style&gt;</code></td><td>样式立即更新</td><td>style 模块独立成文件，只换样式不碰组件</td></tr>
   </table>
+
+  <div class="illust" data-art="hmr-pitstop">
+    <div class="ill-cap">F1 进站换胎：车不熄火、方向不变 —— 模板热替换的秘密</div>
+  </div>
 
   <h2>38.2 编译侧：SFC 拆成带热边界的模块</h2>
   <pre class="code" data-title="Vite 处理 App.vue 的真实产物（简化）"><code>// App.vue?vue&amp;type=script   ← script 模块
@@ -244,6 +248,10 @@ setInterval(() =&gt; {
   return router;
 }</code></pre>
 
+  <div class="illust" data-art="router-signpost">
+    <div class="ill-cap">路口指示牌：currentRoute 一变，RouterView 换人</div>
+  </div>
+
   <h2>40.2 history 层：把浏览器 API 包成统一接口</h2>
   <pre class="code" data-title="createWebHistory（简化）"><code>export function createWebHistory(base) {
   function changeLocation(to, state, replace) {
@@ -346,6 +354,10 @@ function addRoute(record, parent) {
   };
   return pinia;
 }</code></pre>
+
+  <div class="illust" data-art="pinia-vault">
+    <div class="ill-cap">中央金库：defineStore 发惰性钥匙，首次开仓后全是同一个单例</div>
+  </div>
 
   <h2>41.2 defineStore：返回的是一个「惰性 useStore」</h2>
   <pre class="code" data-title="defineStore / useStore（核心）"><code>export function defineStore(id, setup) {
@@ -619,7 +631,9 @@ describe("mini-reactivity", () =&gt; {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 </body>
 </html>

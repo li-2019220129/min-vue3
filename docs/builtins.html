@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 内置组件深读</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -110,6 +110,10 @@ sharedContext.renderer = {
   },
 };
 // ⭐ 这就是「状态全保留」的物理原因：DOM 节点和组件实例从未销毁，只是换了容器</code></pre>
+
+  <div class="illust" data-art="keepalive-warehouse">
+    <div class="ill-cap">仓库管理员：组件下岗不销毁，DOM 搬进 storageContainer 待命</div>
+  </div>
 
   <h2>28.4 什么时候缓存会「真的销毁」</h2>
   <table>
@@ -229,7 +233,9 @@ function registerDep(instance, setupPromise) {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 </body>
 </html>

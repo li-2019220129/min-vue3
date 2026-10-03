@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 运行时深水区</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -83,6 +83,10 @@ switch (type) {
     <code class="inline">nodeValue</code> 赋值。这也是为什么模板里的纯文本插值编译后走的是
     <code class="inline">createTextVNode</code> 通道（对比元素内文本是 setElementText）。
   </p>
+
+  <div class="illust" data-art="fragment-anchor">
+    <div class="ill-cap">Fragment 隐形容器：不产生 DOM，全靠首尾两个锚点定位</div>
+  </div>
 
   <h2>25.3 Fragment：多根模板的「隐形容器」</h2>
   <p>
@@ -264,6 +268,10 @@ function patchUnkeyedChildren(c1, c2, container, anchor) {
     指令钩子没有任何自己的调度机制，全部借宿主 vnode 的 patch 时机。
   </div>
 
+  <div class="illust" data-art="directives-coatrack">
+    <div class="ill-cap">七个钩子借 patch 的四个时机顺路上岗，v-model 本质就是个指令</div>
+  </div>
+
   <h2>26.2 withDirectives：把指令挂上 vnode</h2>
   <p>
     模板里的 <code class="inline">v-my-dir="x"</code> 编译后变成对
@@ -439,6 +447,10 @@ queuePostRenderEffect(() =&gt; dirs[i].unmounted(...), parentInstance);        /
     CSS transition 的触发条件是「属性发生了变化」。元素刚创建就带上终态样式，浏览器不会播放动画。
     先把 <b>起始态</b>（enter-from：如 opacity:0）加上，强制浏览器完成一次样式计算，
     下一帧删掉它 —— 样式从 0 变 1，过渡被触发。这就是 rAF 那一帧存在的全部意义。
+  </div>
+
+  <div class="illust" data-art="transition-stopwatch">
+    <div class="ill-cap">六个 class 的时刻表：enter-from → active → to，animationend 一到就摘牌</div>
   </div>
 
   <h2>27.2 实现骨架：状态机 + 掐表</h2>
@@ -649,8 +661,10 @@ function whenTransitionEnds(el, done) {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 <script src="assets/labs/common.js?v=1"></script>
 <script src="assets/labs/runtime.js?v=1"></script>
 </body>

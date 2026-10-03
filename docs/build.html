@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 把 mini-vue3 写完</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -65,6 +65,10 @@ describe("renderer", () =&gt; {
     需要的原料全部现成：nodeOps / patchProp 在 <code class="inline">runtime-dom</code>（13 章），
     createRenderer 骨架在 <code class="inline">runtime-core</code>（15 章 15.2 的完整实现可直接抄）。
     本五部曲做的是「把教学实现连成能跑的整体」。
+  </div>
+
+  <div class="illust" data-art="build-blueprint">
+    <div class="ill-cap">施工① 开工：图纸在手、原料现成，按依赖顺序抄</div>
   </div>
 
   <h2>44.2 实现清单（按依赖顺序抄）</h2>
@@ -321,6 +325,10 @@ function flushJobs(seen) {
     <tr><td>5</td><td>浅层版 shallowCollectionHandlers（只读不深入）</td><td>3.6 工厂思想</td></tr>
   </table>
 
+  <div class="illust" data-art="build-allgreen">
+    <div class="ill-cap">最终验收：全家福测试全绿，与官方同构 🎓</div>
+  </div>
+
   <h2>48.2 最终验收：全家福测试</h2>
   <pre class="code" data-title="final.spec.ts —— 五部曲全部成果的集大成"><code>describe("mini-vue3 全家福", () =&gt; {
   it("响应式：对象 + 数组 + Map/Set 全部联动", () =&gt; { ... });
@@ -355,7 +363,9 @@ function flushJobs(seen) {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 </body>
 </html>

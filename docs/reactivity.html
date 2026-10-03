@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 响应式篇</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -138,6 +138,10 @@ export class ReactiveEffect&lt;T = any&gt; implements Subscriber {
     特工（effect）潜入目标家（执行 fn）之前，指挥部先给他别上追踪器（activeSub = this）。
     他在屋里碰过的每一样东西（读过的每个属性）都会被记录（track）。
     任务结束后追踪器收回（activeSub = prevEffect），下一批特工再来。
+  </div>
+
+  <div class="illust" data-art="effect-walkie">
+    <div class="ill-cap">追踪器上岗：effect 执行期间读过的每个属性，都会被 track 记录在案</div>
   </div>
 
   <h3>try/finally 的讲究（⑥ 为什么放 finally）</h3>
@@ -323,6 +327,10 @@ proxy.name = "李四"; // 控制台：有人把 name 改成了 李四</code></pr
     <tr><td>删除属性 <code class="inline">delete obj.key</code></td><td>❌ 监控不到（要靠 $delete）</td><td>✅ deleteProperty 拦截</td></tr>
     <tr><td>惰性深层代理</td><td>❌ 初始化时递归整个对象</td><td>✅ 取到时才代理下一层</td></tr>
   </table>
+
+  <div class="illust" data-art="reactive-castle">
+    <div class="ill-cap">Proxy 玻璃房：懒代理管家 —— 你读到哪层，他才包到哪层</div>
+  </div>
 
   <h2>3.2 源码：createReactiveObject 的五道关卡</h2>
   <pre class="code" data-title="官方 3.5 reactive.ts（节选）"><code>export const reactiveMap: WeakMap&lt;Target, any&gt; = new WeakMap()  // 原对象 → 代理（缓存）
@@ -617,6 +625,10 @@ const shallowReadonlyHandlers = { get: createGetter(true,  true), ... };
       <span class="fbox rose">哪些订阅者在等它？</span>
     </div>
     <div class="cap">三层问题，三层结构。官方的答案：WeakMap → Map → Dep 实例</div>
+  </div>
+
+  <div class="illust" data-art="track-roster">
+    <div class="ill-cap">三层名册开册：WeakMap 记对象、Map 记 key、Dep 记下每一位读者</div>
   </div>
 
   <h2>4.2 源码：三层结构的诞生地</h2>
@@ -914,6 +926,10 @@ export function trigger(target, type, key, newValue, oldValue) {
     「响应式很快」的秘诀不是通知得快，而是<b>没必要的通知根本不发生</b>。
   </div>
 
+  <div class="illust" data-art="trigger-megaphone">
+    <div class="ill-cap">trigger 广播站：值一变，名册上的订阅者挨个被点名 —— 有 scheduler 的先排队</div>
+  </div>
+
   <h2>5.2 细节一：<code class="inline">hasChanged</code> 与 NaN 的坑</h2>
   <p>
     官方 set 拦截器用 <code class="inline">hasChanged(value, oldValue)</code>（内部就是
@@ -1175,6 +1191,10 @@ if (isCollection(target) &amp;&amp; hasOwn(inst, key)) {
     <li>如果不清理：以后每次改 name（哪怕一万次），effect 都会白白重跑 → <b>性能浪费 + 逻辑错误</b></li>
   </ol>
 
+  <div class="illust" data-art="cleanup-broom">
+    <div class="ill-cap">保洁时间到：分支切换后，version 快照对不上的旧依赖被请出名册</div>
+  </div>
+
   <h2>6.2 老方案（Vue 3.0~3.3）：全删重建</h2>
   <p>
     老版本的思路很朴素：每次 effect 重跑<b>之前</b>，把它 deps 里登记的所有 dep 全部清空，跑完重新收集。
@@ -1366,8 +1386,10 @@ function postCleanEffect(effect) {
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 <script src="assets/labs/common.js?v=1"></script>
 <script src="assets/labs/reactivity.js?v=1"></script>
 </body>

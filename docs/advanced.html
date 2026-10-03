@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mini-vue3 源码学习 · 进阶篇</title>
-<link rel="stylesheet" href="assets/style.css?v=1">
+<link rel="stylesheet" href="assets/style.css?v=2">
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <a href="roadmap.html#roadmap" data-nav="roadmap">学习路线</a>
   </nav>
   <div class="spacer"></div>
-  <span class="read-progress-pill" id="readPill">📖 已读 0 / 12 章</span>
+  <span class="read-progress-pill" id="readPill">📖 已读 0 / 51 章</span>
 </header>
 
 <div id="mask"></div>
@@ -95,6 +95,10 @@ const proxyNum = new Proxy(num, {});   // 💥 TypeError: 不能代理原始值
     <span class="tag">💡 比喻时间：储物柜</span><br>
     reactive 对象是<b>一整面储物墙</b>（每个格子 = 一个属性，各有各的登记表，所以要三层索引）；
     ref 是<b>单个带锁储物柜</b>（就一个格子 .value，登记表直接贴柜门上）。
+  </div>
+
+  <div class="illust" data-art="ref-gift">
+    <div class="ill-cap">礼盒原理：Proxy 包不住的原始值，装进 RefImpl 里照常响应</div>
   </div>
 
   <h2>7.2 toRef / toRefs：解构救星</h2>
@@ -268,6 +272,10 @@ this._value = toReactive(newValue);   // 对象 → 代理；原始值 → 原�
     —— <b>牛奶还在保质期（不脏）就直接喝，过期了（脏）才去买新的</b>。
     「保质期状态」就是 dirty 标记；「牛奶过期」= 依赖变了。
   </p>
+
+  <div class="illust" data-art="computed-fridge">
+    <div class="ill-cap">冰箱管理法：源数据变了先贴「脏」条，有人来取才开冰箱重做</div>
+  </div>
 
   <h2>8.2 源码：ComputedRefImpl —— computed 自己就是「订阅者」</h2>
   <pre class="code" data-title="官方 3.5 computed.ts（节选）"><code>export class ComputedRefImpl&lt;T = any&gt; implements Subscriber {
@@ -567,6 +575,10 @@ fullName.value = "张 三";   // setter 执行 → 拆回两个源 ref
   }
   ...
 }</code></pre>
+
+  <div class="illust" data-art="watch-doorbell">
+    <div class="ill-cap">门铃与望远镜：source 一按铃，job 拿着入场券决定什么时候响应</div>
+  </div>
 
   <h2>9.2 traverse：为什么要「摸一遍」对象？</h2>
   <p>
@@ -960,6 +972,10 @@ scope.stop();                           // 💥 上面三个全部停止，一�
   </div>
 
   
+  <div class="illust" data-art="nested-dolls">
+    <div class="ill-cap">套娃与团长：内层暂存还原不串号；scope.stop() 一声解散全员退休</div>
+  </div>
+
   <h2>10.5 官方细节：on()/off()、pause/resume 与 detached</h2>
   <p>10.4 已经是官方主干了，这里补三个只有翻源码才能看到的细节。</p>
   <pre class="code" data-title="官方 effectScope.ts（补充）"><code>// ① on()/off()：手动「进入作用域」—— 为 async setup 的恢复场景设计
@@ -1238,6 +1254,10 @@ function debouncedRef(value, delay = 200) {
     </div>
   </div>
 
+  <div class="illust" data-art="customref-gears">
+    <div class="ill-cap">手动挡 ref：什么时候 track、什么时候 trigger，挡把在你手里</div>
+  </div>
+
   <h2>11.5 toRaw 与 markRaw：进出的两扇后门</h2>
   <pre class="code" data-title="后门一：toRaw（代理 → 原对象）"><code>// 官方不做「反查表」—— 代理身上直接带着 __v_raw 属性指向原对象，递归脱壳即可
 export function toRaw(observed) {
@@ -1466,6 +1486,10 @@ set.has(reactive(raw));   // false ❌ 代理 !== 原对象，Set 按 === 判等
   </table>
 
   
+  <div class="illust" data-art="practice-doctor">
+    <div class="ill-cap">V豆 门诊：五步诊断法，专治「数据变了页面不动」</div>
+  </div>
+
   <h2>12.6 一分钟排错：数据变了，页面为什么没更新</h2>
   <p>把本章三个案例的排查思路浓缩成一棵可直接照做的决策树 —— 遇到 bug 从上往下走：</p>
   <div class="diagram">
@@ -1544,8 +1568,10 @@ set.has(reactive(raw));   // false ❌ 代理 !== 原对象，Set 按 === 判等
 </section>
 
 </main>
-<script src="assets/chapters.js?v=1"></script>
-<script src="assets/site.js?v=1"></script>
+<script src="assets/chapters.js?v=2"></script>
+<script src="assets/summaries.js?v=2"></script>
+<script src="assets/art.js?v=2"></script>
+<script src="assets/site.js?v=2"></script>
 <script src="assets/labs/common.js?v=1"></script>
 <script src="assets/labs/advanced.js?v=1"></script>
 </body>
